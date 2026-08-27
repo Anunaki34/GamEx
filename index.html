@@ -302,6 +302,8 @@
   }
   .level-tag.above{ color:var(--red); border-color:var(--red-dim); }
   .level-tag.below{ color:var(--green); border-color:var(--green-dim); }
+  .zg-distance-line{ font-size:10.5px; color:var(--text-dim); margin-top:2px; }
+  .zg-cushion-note{ font-size:10px; color:var(--text-faint); margin-top:2px; font-style:italic; }
 
   .align-banner{
     display:none;
@@ -476,6 +478,8 @@
         <div class="level-value" id="cs_zerogamma">--</div>
         <div class="level-tag" id="cs_zerogamma_tag">--</div>
       </div>
+      <div class="zg-distance-line" id="zgDistanceLine"></div>
+      <div class="zg-cushion-note" id="zgCushionNote"></div>
       <div class="zg-note" id="spreadIndicator" style="margin-top:8px;">Spread: --</div>
 
       <div class="lbl" style="margin-top:12px;">Next Expiry (PST)</div>
@@ -734,7 +738,12 @@ async function fetchOptionsChain() {
      (dealers are modeled as net long calls / short puts vs. customer flow;
      this is the widely-used retail approximation, not a real dealer feed.)
    - Gamma per contract via Black-Scholes: bsGamma(S, K, T, sigma)
-   - Dollar GEX per contract = Gamma * Open Interest * BTC Spot Price * 0.01
+   - Dollar GEX per contract = Gamma * Open Interest * Spot^2 * 0.01
+     (industry-standard convention used by Coinglass/GVol/Laevitas/SpotGamma —
+     the Spot^2 term approximates the dollar delta-hedging flow per 1% move
+     in the underlying; a single Spot factor understates this by orders of
+     magnitude at BTC price levels and was the source of the mismatch
+     against those platforms.)
    ========================================================================= */
 const YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 
@@ -745,8 +754,8 @@ function computeGexByStrike(chain, spot, evalSpot = spot) {
     const T = (opt.expiryDate.getTime() - now) / YEAR_MS;
     if (T <= 0) continue;
     const gamma = bsGamma(evalSpot, opt.strike, T, opt.iv);
-    // Dollar GEX = Gamma * OI * Spot * 0.01 (per spec)
-    const dollarGex = gamma * opt.oi * evalSpot * 0.01;
+    // Dollar GEX = Gamma * OI * Spot^2 * 0.01 (industry-standard convention)
+    const dollarGex = gamma * opt.oi * evalSpot * evalSpot * 0.01;
     const signed = opt.type === 'call' ? dollarGex : -dollarGex;
     byStrike.set(opt.strike, (byStrike.get(opt.strike) || 0) + signed);
   }
@@ -759,31 +768,60 @@ function totalGexAt(chain, evalSpot) {
   return sum;
 }
 
-// Sweep a range around spot to find where cumulative GEX flips sign ("zero gamma / flip point")
+// Zero Gamma flip search: starting at spot, walk outward across the actual
+// available strike prices (not arbitrary evenly-spaced steps), evaluating
+// cumulative Total GEX as if spot were at each strike, looking for the exact
+// point where it flips sign. No range cap — if the flip is 40% away, that's
+// the answer. Downside is exhausted first; upside is only checked if no
+// downside flip exists (matches how dealer gamma support typically sits
+// below spot in a positive-GEX regime, while still handling the bearish
+// case where the nearest flip is above spot).
 function findZeroGammaLevel(chain, spot) {
-  const lo = spot * 0.85, hi = spot * 1.15;
-  const steps = 60;
-  let prevSpot = lo, prevVal = totalGexAt(chain, lo);
-  for (let i = 1; i <= steps; i++) {
-    const s = lo + ((hi - lo) * i) / steps;
-    const val = totalGexAt(chain, s);
-    if ((prevVal <= 0 && val > 0) || (prevVal >= 0 && val < 0)) {
-      // linear interpolation between prevSpot and s
-      const frac = Math.abs(prevVal) / (Math.abs(prevVal) + Math.abs(val));
-      return prevSpot + (s - prevSpot) * frac;
+  const strikes = [...new Set(chain.map(o => o.strike))].sort((a, b) => a - b);
+  if (!strikes.length) return null;
+
+  const downside = strikes.filter(s => s < spot).sort((a, b) => b - a); // nearest-to-spot first (descending)
+  const upside = strikes.filter(s => s > spot).sort((a, b) => a - b);   // nearest-to-spot first (ascending)
+
+  function scan(candidates) {
+    let prevPx = spot;
+    let prevVal = totalGexAt(chain, spot);
+    for (const s of candidates) {
+      const val = totalGexAt(chain, s);
+      if ((prevVal <= 0 && val > 0) || (prevVal >= 0 && val < 0)) {
+        const frac = Math.abs(prevVal) / (Math.abs(prevVal) + Math.abs(val));
+        return prevPx + (s - prevPx) * frac; // linear interpolation between the two evaluated points
+      }
+      prevPx = s;
+      prevVal = val;
     }
-    prevSpot = s; prevVal = val;
+    return null;
   }
-  return null; // no flip found in range
+
+  const downFlip = scan(downside);
+  if (downFlip !== null) return downFlip;
+
+  return scan(upside); // null if genuinely no flip exists anywhere in the available chain
 }
 
+// Max Pain is computed using ONLY the nearest standard Friday 08:00 UTC
+// expiry — pooling other expiries (next week, monthly, quarterly) together
+// understates/distorts the result relative to how Max Pain is conventionally
+// reported (each expiry has its own Max Pain). The exact same expiry-parsing
+// logic used everywhere else (parseInstrumentName -> expiryDate at 08:00 UTC,
+// nextFridayExpiry() for "which Friday is nearest") is reused here rather
+// than any separate/duplicate date logic.
 function findMaxPain(chain, spot) {
-  const strikes = [...new Set(chain.map(o => o.strike))].sort((a, b) => a - b);
+  const nearestExpiry = nextFridayExpiry().getTime();
+  const nearChain = chain.filter(o => o.expiryDate.getTime() === nearestExpiry);
+  if (!nearChain.length) return null; // no contracts at the nearest Friday expiry — nothing to compute
+
+  const strikes = [...new Set(nearChain.map(o => o.strike))].sort((a, b) => a - b);
   if (!strikes.length) return null;
   let best = null, bestLoss = Infinity;
   for (const candidate of strikes) {
     let totalPayout = 0;
-    for (const opt of chain) {
+    for (const opt of nearChain) {
       if (opt.type === 'call' && candidate > opt.strike) {
         totalPayout += (candidate - opt.strike) * opt.oi;
       } else if (opt.type === 'put' && candidate < opt.strike) {
@@ -808,6 +846,10 @@ function findWalls(gexByStrike, spot) {
 /* =========================================================================
    FEATURE 2: DEALER DELTA EXPOSURE (DEX)
    DEX = sum over all strikes of (Delta * Open Interest * Spot * 0.01)
+   NOTE: unlike Dollar GEX, DEX intentionally uses a single Spot factor, not
+   Spot^2 — this is correct and matches the industry convention for dollar
+   delta exposure (delta already has the right linear units for a 1-unit
+   move; the squared term is specific to gamma's role in a 1% move).
    ========================================================================= */
 function computeTotalDex(chain, spot) {
   const now = Date.now();
@@ -866,7 +908,7 @@ function computeGexByExpiryBucket(chain, spot) {
     const T = (opt.expiryDate.getTime() - now) / YEAR_MS;
     if (T <= 0) continue;
     const gamma = bsGamma(spot, opt.strike, T, opt.iv);
-    const dollarGex = gamma * opt.oi * spot * 0.01; // same convention as computeGexByStrike
+    const dollarGex = gamma * opt.oi * spot * spot * 0.01; // same convention as computeGexByStrike (Spot^2)
     const signed = opt.type === 'call' ? dollarGex : -dollarGex;
     sums[bucketForExpiry(opt.expiryDate, boundaries)] += signed;
   }
@@ -1336,9 +1378,29 @@ const MAXPAIN_FAR_PCT = 0.02;   // 2% away from Max Pain counts as "too far" whe
 
 // Session memory (not full tick history) for detecting a same-session
 // "Spot just broke below Zero Gamma" cross at 60s refresh-cycle resolution.
-let prevZeroGammaZone = null;
+let prevSpotAboveZeroGamma = null;
 
-const ZERO_GAMMA_BUFFER_PCT = 0.003; // 0.3% band around Zero Gamma treated as a "Danger Zone"
+// Zero Gamma distance tiers — the % distance between spot and Zero Gamma is
+// now a primary, graduated factor in the headline signal rather than a
+// simple above/below gate. Thresholds are on the *banner logic* side; the
+// cheat sheet's "deep cushion" / "thin cushion" notes use their own,
+// separate, more conservative thresholds (see renderPriceLevels).
+const ZG_SAFE_PCT = 5;      // >5% away = "safely" on that side
+const ZG_EDGE_PCT = 2;      // <2% = "at the edge"; 2-5% = "approaching danger zone"
+
+// Distance from spot to Zero Gamma, signed (+ = spot above, - = spot below)
+// and bucketed into the three tiers used by the banner logic.
+function computeZeroGammaDistance(spot, zeroGamma) {
+  if (zeroGamma === null || zeroGamma === undefined || Number.isNaN(zeroGamma) || zeroGamma === 0 || !spot) return null;
+  const pctDistance = (spot - zeroGamma) / zeroGamma;
+  const absPct = Math.abs(pctDistance) * 100;
+  const above = pctDistance >= 0;
+  let tier;
+  if (absPct > ZG_SAFE_PCT) tier = 'safe';
+  else if (absPct >= ZG_EDGE_PCT) tier = 'approaching';
+  else tier = 'edge';
+  return { pctDistance, absPct, above, tier };
+}
 
 function generateHeadlineSignal({ totalGex, trendInfo, dex, spot, zeroGamma, maxPain }) {
   const trend = trendInfo ? trendInfo.trend : null;
@@ -1351,35 +1413,20 @@ function generateHeadlineSignal({ totalGex, trendInfo, dex, spot, zeroGamma, max
       state: 'neutral', label: 'INSUFFICIENT DATA / FLAT',
       summary: 'Data unclear. Size down or wait.',
       why: ['Live spot price or Total GEX is unavailable.'],
-      partialNote, zeroGammaDanger: false
+      partialNote, zeroGammaNote: null
     };
   }
 
-  // Distance-to-Zero-Gamma buffer: spot must clear a 0.3% band on either side
-  // of Zero Gamma to count as cleanly "above" or "below" it. Inside the band
-  // is a "Danger Zone" — deliberately excluded from both the Green and Red
-  // strict conditions below, so hugging the line can never read as confident
-  // confirmation in either direction.
-  const haveZeroGamma = zeroGamma !== null && zeroGamma !== undefined && !Number.isNaN(zeroGamma) && zeroGamma !== 0;
-  let zeroGammaZone = null; // 'above' | 'below' | 'danger' | null (unknown)
-  if (haveZeroGamma) {
-    if (spot > zeroGamma * (1 + ZERO_GAMMA_BUFFER_PCT)) zeroGammaZone = 'above';
-    else if (spot < zeroGamma * (1 - ZERO_GAMMA_BUFFER_PCT)) zeroGammaZone = 'below';
-    else zeroGammaZone = 'danger';
-  }
-  const spotAboveZeroGamma = zeroGammaZone === 'above' ? true : (zeroGammaZone === 'below' ? false : null);
-  const zeroGammaDanger = zeroGammaZone === 'danger';
-  const DANGER_NOTE = 'Hugging Zero Gamma. Volatility can spike either way.';
+  const zg = computeZeroGammaDistance(spot, zeroGamma);
+  const haveZeroGamma = zg !== null;
+  const spotAboveZeroGamma = haveZeroGamma ? zg.above : null;
   const haveDex = dex !== null && dex !== undefined && !Number.isNaN(dex);
 
-  // "Just crossed" detection at 60s resolution using session memory. Tracks
-  // the zone (not just the boolean) so a cross is only registered once spot
-  // has cleanly entered the opposite band, not merely wandered into the
-  // Danger Zone buffer.
+  // "Just crossed" detection at 60s resolution using session memory.
   let crossedBelowZeroGamma = false;
-  if (zeroGammaZone !== null) {
-    if (prevZeroGammaZone !== 'below' && zeroGammaZone === 'below') crossedBelowZeroGamma = true;
-    prevZeroGammaZone = zeroGammaZone;
+  if (spotAboveZeroGamma !== null) {
+    if (prevSpotAboveZeroGamma === true && spotAboveZeroGamma === false) crossedBelowZeroGamma = true;
+    prevSpotAboveZeroGamma = spotAboveZeroGamma;
   }
 
   const hoursToExpiry = (nextFridayExpiry().getTime() - Date.now()) / 3600000;
@@ -1388,6 +1435,10 @@ function generateHeadlineSignal({ totalGex, trendInfo, dex, spot, zeroGamma, max
   const tooFarAboveMaxPainNearExpiry =
     pctAboveMaxPain !== null && pctAboveMaxPain > MAXPAIN_FAR_PCT && hoursToExpiry < NEAR_EXPIRY_HOURS;
 
+  const zeroGammaNote = haveZeroGamma && zg.tier === 'approaching' ? 'Approaching danger zone near Zero Gamma (2-5%).'
+    : haveZeroGamma && zg.tier === 'edge' ? 'At the edge of Zero Gamma. Volatility imminent.'
+    : null;
+
   const ORANGE_SUMMARY = 'Market structure is shifting. Do not enter new positions. If in a trade, tighten stop losses immediately.';
 
   // --- ORANGE: transition / high risk (checked first — most urgent/specific) ---
@@ -1395,52 +1446,93 @@ function generateHeadlineSignal({ totalGex, trendInfo, dex, spot, zeroGamma, max
     return {
       state: 'orange', label: 'TRANSITION / HIGH RISK', summary: ORANGE_SUMMARY,
       why: ['Total GEX just flipped from positive to negative within the last 2 hours.'],
-      partialNote, zeroGammaDanger
+      partialNote, zeroGammaNote
     };
   }
   if (totalGex < 0 && trend === 'Rising' && spotAboveZeroGamma === true) {
     return {
       state: 'orange', label: 'TRANSITION / HIGH RISK', summary: ORANGE_SUMMARY,
       why: ['Spot is above Zero Gamma while Total GEX is still negative.', '24h trend is rising — potential reversal building.'],
-      partialNote, zeroGammaDanger
+      partialNote, zeroGammaNote
     };
   }
   if (totalGex > 0 && crossedBelowZeroGamma) {
     return {
       state: 'orange', label: 'TRANSITION / HIGH RISK', summary: ORANGE_SUMMARY,
       why: ['Total GEX is positive but Spot just broke below Zero Gamma.'],
-      partialNote, zeroGammaDanger
+      partialNote, zeroGammaNote
     };
   }
-  // Danger Zone upgrade: negative GEX while hugging Zero Gamma reads as a
-  // high-risk transition rather than a confirmed Red, since Red requires
-  // spot to be cleanly below the line.
-  if (totalGex < 0 && zeroGammaDanger) {
+  // Positive GEX but the nearest flip point is actually above spot (i.e.
+  // spot is below Zero Gamma) — an internally conflicting read, never a
+  // clean Green or Yellow no matter how positive Total GEX looks.
+  if (totalGex > 0 && haveZeroGamma && !zg.above) {
     return {
       state: 'orange', label: 'TRANSITION / HIGH RISK', summary: ORANGE_SUMMARY,
-      why: [DANGER_NOTE, 'Total GEX is negative — not yet confirmed Red while spot hugs Zero Gamma.'],
-      partialNote, zeroGammaDanger
+      why: ['Spot is below Zero Gamma while Total GEX reads positive — conflicting signal.'],
+      partialNote, zeroGammaNote
+    };
+  }
+  // <2% ("at the edge") never reads as a confident Green even with positive
+  // GEX — too close to the flip line for that.
+  if (totalGex > 0 && haveZeroGamma && zg.above && zg.tier === 'edge') {
+    return {
+      state: 'orange', label: 'TRANSITION / HIGH RISK', summary: ORANGE_SUMMARY,
+      why: ['At the edge of Zero Gamma (<2%). Volatility imminent despite positive Total GEX.'],
+      partialNote, zeroGammaNote
     };
   }
 
-  // --- GREEN: confirmed long zone (strict AND — every input must be known and aligned) ---
-  if (totalGex > 0 && (trend === 'Stable' || trend === 'Rising') && haveDex && dex > 0 && spotAboveZeroGamma === true) {
+  // --- GREEN: confirmed long zone (strict AND — every input must be known,
+  // aligned, and spot must be a SAFE distance (>5%) above Zero Gamma) ---
+  if (totalGex > 0 && (trend === 'Stable' || trend === 'Rising') && haveDex && dex > 0 &&
+      haveZeroGamma && zg.above && zg.tier === 'safe') {
     return {
       state: 'green', label: 'CONFIRMED LONG ZONE',
       summary: 'Shock absorbers active. Dealers buying dips. Bias is up. Safe to look for entries or hold long.',
-      why: ['Total GEX is positive.', 'Dealer Delta is positive.', `Trend is ${trend.toLowerCase()} with spot above Zero Gamma.`],
-      partialNote, zeroGammaDanger
+      why: ['Total GEX is positive.', 'Dealer Delta is positive.', `Trend is ${trend.toLowerCase()}, spot >5% above Zero Gamma.`],
+      partialNote, zeroGammaNote
     };
   }
 
-  // --- RED: no fly zone / exit longs (strict AND) ---
-  if (totalGex < 0 && (trend === 'Stable' || trend === 'Falling') && haveDex && dex < 0 && spotAboveZeroGamma === false) {
+  // --- RED: no fly zone / exit longs (strict AND — spot below Zero Gamma at
+  // ANY distance counts, per the "nearest flip above spot" rule) ---
+  if (totalGex < 0 && (trend === 'Stable' || trend === 'Falling') && haveDex && dex < 0 &&
+      haveZeroGamma && !zg.above) {
     return {
       state: 'red', label: 'NO FLY ZONE / EXIT LONGS',
       summary: 'Dealers are short gamma and short delta. Volatility is expanding downward. Stay in cash or exit longs. Do not catch falling knives.',
       why: ['Total GEX is negative.', 'Dealer Delta is negative.', 'Spot is below Zero Gamma.'],
-      partialNote, zeroGammaDanger
+      partialNote, zeroGammaNote
     };
+  }
+
+  // --- Negative GEX that didn't confirm Red: tier-driven Orange fallbacks ---
+  if (totalGex < 0 && haveZeroGamma) {
+    if (!zg.above) {
+      return {
+        state: 'orange', label: 'TRANSITION / HIGH RISK', summary: ORANGE_SUMMARY,
+        why: ['Spot is below Zero Gamma with negative Total GEX, but trend or Dealer Delta isn\u2019t fully confirming yet.'],
+        partialNote, zeroGammaNote
+      };
+    }
+    if (zg.tier === 'edge') {
+      return {
+        state: 'orange', label: 'TRANSITION / HIGH RISK', summary: ORANGE_SUMMARY,
+        why: ['At the edge of Zero Gamma (<2%) with negative Total GEX. Volatility imminent.'],
+        partialNote, zeroGammaNote
+      };
+    }
+    if (zg.tier === 'approaching') {
+      return {
+        state: 'orange', label: 'TRANSITION / HIGH RISK', summary: ORANGE_SUMMARY,
+        why: ['Approaching danger zone near Zero Gamma (2-5%) with negative Total GEX.'],
+        partialNote, zeroGammaNote
+      };
+    }
+    // else: safe tier, comfortably above Zero Gamma despite negative GEX,
+    // and trend isn't Rising (that case was already caught above) — falls
+    // through to the conflicting/neutral default at the bottom.
   }
 
   // --- YELLOW: cautious long / drifting (positive GEX, but not clean enough for Green) ---
@@ -1451,25 +1543,23 @@ function generateHeadlineSignal({ totalGex, trendInfo, dex, spot, zeroGamma, max
     if (tooFarAboveMaxPainNearExpiry) {
       yellowReasons.push(`Spot is ${(pctAboveMaxPain * 100).toFixed(1)}% above Max Pain with expiry in ${hoursToExpiry.toFixed(1)}h.`);
     }
-    // Danger Zone downgrade: positive GEX while hugging Zero Gamma isn't a
-    // clean Green even if DEX/trend otherwise look fine.
-    if (zeroGammaDanger) yellowReasons.push(DANGER_NOTE);
+    if (haveZeroGamma && zg.tier === 'approaching') yellowReasons.push(zeroGammaNote);
     if (yellowReasons.length) {
       return {
         state: 'yellow', label: 'CAUTIOUS LONG / DRIFTING',
         summary: 'Calm market but the wind is not at your back. Rallies may be sold. Take partial profits or wait for a better entry.',
         why: yellowReasons.slice(0, 3),
-        partialNote, zeroGammaDanger
+        partialNote, zeroGammaNote
       };
     }
     // Positive GEX with no Yellow warning tripped, but missing DEX or Zero
     // Gamma means we can't actually confirm the clean Green setup either.
-    if (!haveDex || spotAboveZeroGamma === null) {
+    if (!haveDex || !haveZeroGamma) {
       return {
         state: 'neutral', label: 'INSUFFICIENT DATA / FLAT',
         summary: 'Data unclear. Size down or wait.',
         why: ['Total GEX is positive, but Dealer Delta or Zero Gamma is unavailable to confirm a clean setup.'],
-        partialNote, zeroGammaDanger
+        partialNote, zeroGammaNote
       };
     }
   }
@@ -1478,8 +1568,8 @@ function generateHeadlineSignal({ totalGex, trendInfo, dex, spot, zeroGamma, max
   return {
     state: 'neutral', label: 'INSUFFICIENT DATA / FLAT',
     summary: 'Data unclear. Size down or wait.',
-    why: [zeroGammaDanger ? DANGER_NOTE : 'Parameters are conflicting or incomplete relative to the rules above.'],
-    partialNote, zeroGammaDanger
+    why: [zeroGammaNote || 'Parameters are conflicting or incomplete relative to the rules above.'],
+    partialNote, zeroGammaNote
   };
 }
 
@@ -1712,7 +1802,7 @@ function renderRegime(totalGex, trendInfo, dex, spot, zeroGamma, maxPain) {
   action.textContent = display.summary;
   partialNoteEl.textContent = display.partialNote || '';
   pendingNoteEl.textContent = confirmed.pendingNote || '';
-  dangerNoteEl.textContent = display.zeroGammaDanger ? '⚠️ Hugging Zero Gamma. Volatility can spike either way.' : '';
+  dangerNoteEl.textContent = display.zeroGammaNote ? '⚠️ ' + display.zeroGammaNote : '';
 
   const trendLabel = trendInfo.dataPoints > 0 ? trendInfo.trend + (trendInfo.isSharp ? ' (sharp)' : '') : 'Insufficient data';
   const changeLabel = trendInfo.change24h !== null ? fmtUsdSigned(trendInfo.change24h) : '--';
@@ -1792,12 +1882,41 @@ function renderPriceLevels(spot, { maxPain, callWall, putWall, zeroGamma }) {
   setLevelRow('cs_maxpain', 'cs_maxpain_tag', maxPain, spot);
   setLevelRow('cs_callwall', 'cs_callwall_tag', callWall, spot);
   setLevelRow('cs_putwall', 'cs_putwall_tag', putWall, spot);
-  setLevelRow('cs_zerogamma', 'cs_zerogamma_tag', zeroGamma, spot, 'no flip in range');
+  setLevelRow('cs_zerogamma', 'cs_zerogamma_tag', zeroGamma, spot, 'no flip detected');
+  renderZeroGammaDetail(spot, zeroGamma);
 
   const aligned = checkLevelAlignment(maxPain, callWall, putWall, zeroGamma);
   document.getElementById('levelAlignBanner').style.display = aligned ? 'block' : 'none';
 
   renderSpreadIndicator(spot, callWall, putWall);
+}
+
+// Cheat-sheet-only cushion thresholds — deliberately more conservative than
+// the banner logic's 5%/2% tiers, since these describe "how comfortable
+// should I feel" rather than "what state should the banner be in."
+const ZG_CHEATSHEET_DEEP_PCT = 15;
+const ZG_CHEATSHEET_THIN_PCT = 3;
+
+function renderZeroGammaDetail(spot, zeroGamma) {
+  const distEl = document.getElementById('zgDistanceLine');
+  const cushionEl = document.getElementById('zgCushionNote');
+  if (zeroGamma === null || zeroGamma === undefined || Number.isNaN(zeroGamma) || !spot) {
+    distEl.textContent = '';
+    cushionEl.textContent = '';
+    return;
+  }
+  const pctDistance = ((spot - zeroGamma) / zeroGamma) * 100;
+  const absPct = Math.abs(pctDistance);
+  const direction = pctDistance >= 0 ? 'above' : 'below';
+  distEl.textContent = `Spot is ${absPct.toFixed(1)}% ${direction} Zero Gamma`;
+
+  if (absPct > ZG_CHEATSHEET_DEEP_PCT) {
+    cushionEl.textContent = 'Deep cushion. Market structure stable.';
+  } else if (absPct < ZG_CHEATSHEET_THIN_PCT) {
+    cushionEl.textContent = 'Thin cushion. Volatility can spike soon.';
+  } else {
+    cushionEl.textContent = '';
+  }
 }
 
 const SPREAD_TIGHT_PCT = 2;  // spread below this % of spot = "tight range"
