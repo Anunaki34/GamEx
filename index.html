@@ -197,6 +197,7 @@
     border:1px solid var(--line); padding:2px 8px; border-radius:2px;
   }
   .regime-danger-note{color:var(--yellow); font-size:11px; font-weight:600; margin-top:6px;}
+  .regime-secondary-note{color:var(--text-faint); font-size:10px; margin-top:4px; font-style:italic;}
   .regime-session-note{color:var(--text-faint); font-size:10px; margin-top:4px; font-style:italic;}
   .regime-expiry-note{color:var(--text-faint); font-size:10px; margin-top:4px;}
   .regime-pending-note{color:var(--cyan); font-size:10px; font-weight:600; margin-top:4px; letter-spacing:.03em;}
@@ -302,6 +303,30 @@
   }
   .level-tag.above{ color:var(--red); border-color:var(--red-dim); }
   .level-tag.below{ color:var(--green); border-color:var(--green-dim); }
+
+  .weekly-table{width:100%; border-collapse:collapse; font-size:11px; margin-top:4px;}
+  .weekly-table thead th{
+    font-size:9px; letter-spacing:.08em; text-transform:uppercase; color:var(--text-faint);
+    text-align:right; font-weight:500; padding-bottom:6px; border-bottom:1px solid var(--line-soft);
+  }
+  .weekly-table thead th:first-child{text-align:left;}
+  .weekly-table tbody tr{border-bottom:1px solid var(--line-soft);}
+  .weekly-table tbody tr:last-child{border-bottom:none;}
+  .weekly-table td{padding:8px 4px;}
+  .wt-label{color:var(--text-faint); font-size:10px; letter-spacing:.03em; text-transform:uppercase;}
+  .wt-primary{
+    text-align:right; font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:13.5px; color:var(--white);
+  }
+  .wt-primary.pos{color:var(--green);}
+  .wt-primary.neg{color:var(--red);}
+  .wt-primary .wt-tag{
+    display:block; font-family:'IBM Plex Mono',monospace; font-weight:400; font-size:8.5px;
+    letter-spacing:.04em; text-transform:uppercase; color:var(--text-faint); margin-top:1px;
+  }
+  .wt-secondary{text-align:right; color:var(--text-faint); font-size:10.5px; font-weight:400;}
+  .wt-secondary.pos{color:rgba(38,217,122,0.55);}
+  .wt-secondary.neg{color:rgba(255,77,94,0.55);}
+
   .zg-distance-line{ font-size:10.5px; color:var(--text-dim); margin-top:2px; }
   .zg-cushion-note{ font-size:10px; color:var(--text-faint); margin-top:2px; font-style:italic; }
 
@@ -339,6 +364,13 @@
   }
   .range-btn:hover{color:var(--text); border-color:var(--text-faint);}
   .range-btn.active{background:rgba(53,201,214,0.12); border-color:var(--cyan); color:var(--cyan);}
+  .scope-btn{
+    background:var(--panel-2); border:1px solid var(--line); color:var(--text-dim);
+    font-family:'IBM Plex Mono',monospace; font-size:11px; padding:5px 12px; border-radius:2px; cursor:pointer;
+    transition: all .15s ease;
+  }
+  .scope-btn:hover{color:var(--text); border-color:var(--text-faint);}
+  .scope-btn.active{background:rgba(240,169,60,0.14); border-color:var(--amber); color:var(--amber);}
   #vpsBanner{
     display:none;
     background:rgba(242,201,76,0.1);
@@ -402,6 +434,7 @@
         <div class="regime-summary" id="regimeSummary">Pulling live options chain from Deribit and computing the composite headline signal.</div>
         <div class="regime-why" id="regimeWhy"></div>
         <div class="regime-danger-note" id="regimeDangerNote"></div>
+        <div class="regime-secondary-note" id="regimeSecondaryNote"></div>
         <div class="regime-session-note" id="regimeSessionNote"></div>
         <div class="regime-expiry-note" id="regimeExpiryNote"></div>
         <div class="regime-pending-note" id="regimePendingNote"></div>
@@ -440,44 +473,58 @@
     <div class="panel">
       <div class="panel-title"><span>Spot Trader Cheat Sheet</span></div>
 
-      <!-- Section A: General Trend Basis -->
+      <!-- Section A: General Trend Basis (Regime only — DEX now lives in the Weekly/All-Expiries table below) -->
       <div class="cheat-section-label">General Trend Basis</div>
       <table class="cheat">
         <tr><td class="k">Regime</td><td class="v" id="cs_regime">--</td></tr>
       </table>
       <div class="action-box" id="traderAction">Waiting for live data to compute trader guidance...</div>
-      <table class="cheat">
-        <tr><td class="k">Dealer Delta (DEX)</td><td class="v" id="cs_dex">--</td></tr>
-      </table>
-      <div class="zg-note" id="dexNote">Dealer Delta note will appear once live data loads.</div>
 
       <div class="cheat-divider"></div>
 
-      <!-- Section B: Price Levels, fixed order Max Pain -> Call Wall -> Put Wall -> Zero Gamma -->
-      <div class="cheat-section-label">Price Levels</div>
+      <!-- Section B: Weekly (primary) vs All-Expiries (secondary/muted) two-column table -->
+      <div class="cheat-section-label">Weekly (Nearest Fri 08:00 UTC) vs All Expiries</div>
       <div id="levelAlignBanner" class="align-banner">
         &#9989; Levels Aligned: Clean setup. Entry at Put Wall, Stop at Zero Gamma, Target at Max Pain/Call Wall.
       </div>
-      <div class="level-row">
-        <div class="level-label">Max Pain</div>
-        <div class="level-value" id="cs_maxpain">--</div>
-        <div class="level-tag" id="cs_maxpain_tag">--</div>
-      </div>
-      <div class="level-row">
-        <div class="level-label">Call Wall</div>
-        <div class="level-value" id="cs_callwall">--</div>
-        <div class="level-tag" id="cs_callwall_tag">--</div>
-      </div>
-      <div class="level-row">
-        <div class="level-label">Put Wall</div>
-        <div class="level-value" id="cs_putwall">--</div>
-        <div class="level-tag" id="cs_putwall_tag">--</div>
-      </div>
-      <div class="level-row">
-        <div class="level-label">Zero Gamma</div>
-        <div class="level-value" id="cs_zerogamma">--</div>
-        <div class="level-tag" id="cs_zerogamma_tag">--</div>
-      </div>
+      <table class="weekly-table">
+        <thead>
+          <tr><th></th><th>Weekly</th><th>All Expiries</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="wt-label">Total GEX</td>
+            <td class="wt-primary" id="wt_totalgex_weekly">--</td>
+            <td class="wt-secondary" id="wt_totalgex_all">--</td>
+          </tr>
+          <tr>
+            <td class="wt-label">DEX</td>
+            <td class="wt-primary" id="wt_dex_weekly">--</td>
+            <td class="wt-secondary" id="wt_dex_all">--</td>
+          </tr>
+          <tr>
+            <td class="wt-label">Call Wall</td>
+            <td class="wt-primary" id="wt_callwall_weekly">--</td>
+            <td class="wt-secondary" id="wt_callwall_all">--</td>
+          </tr>
+          <tr>
+            <td class="wt-label">Put Wall</td>
+            <td class="wt-primary" id="wt_putwall_weekly">--</td>
+            <td class="wt-secondary" id="wt_putwall_all">--</td>
+          </tr>
+          <tr>
+            <td class="wt-label">Zero Gamma</td>
+            <td class="wt-primary" id="wt_zerogamma_weekly">--</td>
+            <td class="wt-secondary" id="wt_zerogamma_all">--</td>
+          </tr>
+          <tr>
+            <td class="wt-label">Max Pain</td>
+            <td class="wt-primary" id="wt_maxpain_weekly">--</td>
+            <td class="wt-secondary">weekly only</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="zg-note" id="dexNote">Dealer Delta note will appear once live data loads.</div>
       <div class="zg-distance-line" id="zgDistanceLine"></div>
       <div class="zg-cushion-note" id="zgCushionNote"></div>
       <div class="zg-note" id="spreadIndicator" style="margin-top:8px;">Spread: --</div>
@@ -494,10 +541,16 @@
   <div class="panel hist-panel">
     <div class="hist-header">
       <div class="panel-title" style="margin-bottom:0;"><span>Historical Total GEX</span></div>
-      <div class="range-toggle">
-        <button class="range-btn active" data-range="1d">1D</button>
-        <button class="range-btn" data-range="7d">7D</button>
-        <button class="range-btn" data-range="30d">30D</button>
+      <div style="display:flex; gap:14px; align-items:center; flex-wrap:wrap;">
+        <div class="range-toggle">
+          <button class="scope-btn active" data-scope="weekly">Weekly</button>
+          <button class="scope-btn" data-scope="all_expiries">All Expiries</button>
+        </div>
+        <div class="range-toggle">
+          <button class="range-btn active" data-range="1d">1D</button>
+          <button class="range-btn" data-range="7d">7D</button>
+          <button class="range-btn" data-range="30d">30D</button>
+        </div>
       </div>
     </div>
     <div id="vpsBanner">&#9888; Historical VPS Offline. Using Live Data Only. Retrying automatically...</div>
@@ -768,6 +821,16 @@ function totalGexAt(chain, evalSpot) {
   return sum;
 }
 
+// Filters the full options chain down to only the nearest standard Friday
+// 08:00 UTC expiry — the "weekly" scope that is now the primary driver for
+// the Smart Headline Banner and the Cheat Sheet's Weekly column. Reuses the
+// exact same expiry timestamp (nextFridayExpiry()) as findMaxPain(), so
+// "weekly" means the same thing everywhere in the app.
+function filterToNearestWeeklyExpiry(chain) {
+  const nearestExpiry = nextFridayExpiry().getTime();
+  return chain.filter(o => o.expiryDate.getTime() === nearestExpiry);
+}
+
 // Zero Gamma flip search: starting at spot, walk outward across the actual
 // available strike prices (not arbitrary evenly-spaced steps), evaluating
 // cumulative Total GEX as if spot were at each strike, looking for the exact
@@ -961,12 +1024,13 @@ async function refreshRollingWindow() {
   try {
     const rows = await fetchVpsHistory('1d');
     if (mySeq !== rollingRequestSeq) return; // superseded by a newer call
+    // Trend engine tracks WEEKLY Total GEX (the primary metric per the
+    // intraday redesign). Rows missing weekly.total_gex are skipped
+    // entirely rather than zero-filled — a fake 0 would corrupt the 4h/24h
+    // trend average far worse than just having fewer data points.
     const parsed = rows
-      .map(r => ({
-        t: new Date(r.t ?? r.timestamp ?? r.time).getTime(),
-        gex: r.gex ?? r.total_gex ?? r.value ?? 0
-      }))
-      .filter(p => Number.isFinite(p.t) && Number.isFinite(p.gex))
+      .map(r => ({ t: extractRowTimestamp(r), gex: extractRowMetric(r, 'weekly', 'total_gex') }))
+      .filter(p => Number.isFinite(p.t) && p.gex !== null)
       .sort((a, b) => a.t - b.t);
     if (parsed.length) {
       rollingWindow = parsed;
@@ -1202,8 +1266,9 @@ function initHistChart() {
   histChart = new Chart(ctx, {
     type: 'line',
     data: { labels: [], datasets: [{
-      label: 'Total GEX', data: [], borderColor: '#35c9d6', backgroundColor: 'rgba(53,201,214,0.08)',
-      pointRadius: 0, borderWidth: 1.75, fill: true, tension: 0.25
+      label: 'Weekly Total GEX', data: [], borderColor: '#35c9d6', backgroundColor: 'rgba(53,201,214,0.08)',
+      pointRadius: 0, borderWidth: 1.75, fill: true, tension: 0.25,
+      spanGaps: false // null points (missing weekly data on older snapshots) render as a visible gap, not a bridged/interpolated line
     }] },
     options: {
       responsive: true, maintainAspectRatio: false,
@@ -1212,7 +1277,10 @@ function initHistChart() {
         x: { ticks: { color: '#7c8798', font: { size: 9.5 }, maxTicksLimit: 10 }, grid: { color: '#182030' } },
         y: { ticks: { color: '#7c8798', callback: v => fmtUsd(v), font: { size: 10 } }, grid: { color: '#182030' } }
       },
-      plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => fmtUsd(ctx.raw) } } }
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => ctx.raw === null ? 'No data' : fmtUsd(ctx.raw) } }
+      }
     }
   });
 }
@@ -1220,8 +1288,26 @@ function initHistChart() {
 /* =========================================================================
    PART 2 + 3: VPS HISTORICAL DATA WITH FALLBACK & AUTO-RECOVERY
    ========================================================================= */
-function setVpsBanner(show) {
-  document.getElementById('vpsBanner').style.display = show ? 'flex' : 'none';
+function setVpsBanner(show, extraText = null) {
+  const el = document.getElementById('vpsBanner');
+  el.style.display = show ? 'flex' : 'none';
+  if (show) {
+    const baseText = '&#9888; Historical VPS Offline. Using Live Data Only. Retrying automatically...';
+    el.innerHTML = extraText ? baseText + '<br><span style="font-weight:400;">' + extraText + '</span>' : baseText;
+  }
+}
+
+// The VPS only sends Access-Control-Allow-Origin for these two exact
+// origins. If this page isn't being served from one of them, the browser
+// blocks every VPS request at the network layer — no HTTP status, no
+// response body, nothing our code can see or work around. This is
+// completely independent of whether the request/parsing itself is correct.
+const VPS_ALLOWED_ORIGINS = ['https://www.tradingview.com', 'https://anunaki34.github.io'];
+
+function checkOriginAllowlist() {
+  // file:// pages report origin as the literal string "null" in most browsers.
+  const origin = window.location.origin;
+  return { allowed: VPS_ALLOWED_ORIGINS.includes(origin), origin };
 }
 
 // VPS_BASE_URL is now https://, so the classic Mixed-Content scenario (an
@@ -1235,6 +1321,18 @@ function isLikelyMixedContentRisk() {
 }
 
 function diagnoseVpsFetchError(err) {
+  const originCheck = checkOriginAllowlist();
+  if (!originCheck.allowed) {
+    console.warn(
+      `[VPS] This page's origin is "${originCheck.origin}", which is NOT in the VPS's allowed CORS origins ` +
+      `(${VPS_ALLOWED_ORIGINS.join(', ')}). The browser blocks every request to the VPS from any other origin ` +
+      `at the network layer, before your code (or the VPS) ever gets a chance to respond correctly. ` +
+      `This is very likely why the banner persists even though the request/parsing logic is correct. ` +
+      `Fix: open/host this dashboard from one of the allowed origins (e.g. deploy it to your ` +
+      `anunaki34.github.io GitHub Pages site) rather than as a local file or from any other domain.`
+    );
+    return;
+  }
   if (isLikelyMixedContentRisk()) {
     console.warn(
       '[VPS] Fetch failed and this page is on https:// while VPS_BASE_URL is http://. ' +
@@ -1263,11 +1361,50 @@ async function fetchVpsHistory(range) {
     const res = await fetchWithTimeout(url, { headers: { 'x-api-key': VPS_API_KEY } }, VPS_FETCH_TIMEOUT_MS);
     if (res.status === 401 || res.status >= 500) throw new Error('VPS HTTP ' + res.status);
     if (!res.ok) throw new Error('VPS HTTP ' + res.status);
-    return await res.json(); // expected shape: [{ t: ISOString|epoch, gex: number }, ...]
+    return await res.json();
+    // Current shape: [{ timestamp, spot_price, weekly: { total_gex, dex, put_wall,
+    // call_wall, zero_gamma, max_pain }, all_expiries: { total_gex, dex, put_wall,
+    // call_wall, zero_gamma } }, ...]. extractRowMetric()/extractRowTimestamp()/
+    // extractRowSpot() below also tolerate the older flat shape for backward compat.
   } catch (err) {
     diagnoseVpsFetchError(err);
     throw err;
   }
+}
+
+/* =========================================================================
+   Safe row-metric extraction for /api/gex/history rows. These never throw —
+   a missing or malformed field just returns null — and null is a distinct,
+   meaningful value (skip this point / show a gap), never silently coerced
+   to 0. This is what makes "some points are null" different from "the
+   fetch itself failed": the fetch's success/failure is decided entirely by
+   fetchVpsHistory() above (HTTP status, network error, timeout); everything
+   below only ever runs after that has already succeeded.
+   ========================================================================= */
+function asFiniteNumber(v) {
+  return (typeof v === 'number' && Number.isFinite(v)) ? v : null;
+}
+
+// scope: 'weekly' | 'all_expiries' | null. Falls back to the older flat
+// top-level fields (r.gex / r.total_gex / r.value) when the nested shape
+// isn't present, so this keeps working against older VPS responses too.
+function extractRowMetric(row, scope, field) {
+  if (!row) return null;
+  if (scope && row[scope] && row[scope][field] !== undefined) {
+    return asFiniteNumber(row[scope][field]);
+  }
+  if (field === 'total_gex') {
+    return asFiniteNumber(row.gex ?? row.total_gex ?? row.value);
+  }
+  return null;
+}
+
+function extractRowTimestamp(row) {
+  return new Date(row.timestamp ?? row.t ?? row.time).getTime();
+}
+
+function extractRowSpot(row) {
+  return asFiniteNumber(row.spot_price ?? row.spot ?? row.price ?? row.btc_price);
 }
 
 async function fetchVpsLatest() {
@@ -1300,6 +1437,30 @@ function normalizeVpsSnapshot(snap) {
   };
 }
 
+let histMetricScope = 'weekly'; // 'weekly' (default) | 'all_expiries' — which nested field feeds the chart
+let lastHistoryRows = [];       // raw rows from the last successful fetch, cached so toggling scope needs no re-fetch
+
+// Renders the historical chart from whatever rows are already cached, using
+// the currently-selected metric scope. Never throws: a row missing the
+// requested scope's total_gex becomes `null` (a gap in the line, per spec
+// requirement #3), never a fake 0 and never an exception that could be
+// mistaken for a fetch failure.
+function renderHistChartFromCache(range = currentRange) {
+  if (!histChart) return;
+  const labels = lastHistoryRows.map(r => {
+    const d = new Date(extractRowTimestamp(r));
+    return range === '1d'
+      ? d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Manila' })
+      : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'Asia/Manila' });
+  });
+  const values = lastHistoryRows.map(r => extractRowMetric(r, histMetricScope, 'total_gex')); // null = gap
+
+  histChart.data.labels = labels;
+  histChart.data.datasets[0].data = values;
+  histChart.data.datasets[0].label = histMetricScope === 'weekly' ? 'Weekly Total GEX' : 'All-Expiries Total GEX';
+  histChart.update('none');
+}
+
 async function refreshHistoricalChart(range = currentRange) {
   const mySeq = ++histRequestSeq;
   beginFetch();
@@ -1310,30 +1471,23 @@ async function refreshHistoricalChart(range = currentRange) {
     // superseded this one — drop this response so it can't clobber fresher data.
     if (mySeq !== histRequestSeq) return;
 
+    // Reaching here means the fetch itself succeeded (fetchVpsHistory()
+    // already threw on network error / timeout / 401 / 5xx) — per spec, the
+    // banner is governed ONLY by that, never by what's inside the payload.
     const wasOffline = !vpsOnline;
     vpsOnline = true;
     setVpsBanner(false);
 
-    const labels = rows.map(r => {
-      const d = new Date(r.t ?? r.timestamp ?? r.time);
-      // Display in PST (Asia/Manila) regardless of the row's source timezone or the browser's OS setting.
-      return range === '1d'
-        ? d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Manila' })
-        : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'Asia/Manila' });
-    });
-    const values = rows.map(r => r.gex ?? r.total_gex ?? r.value ?? 0);
-
-    if (histChart) {
-      histChart.data.labels = labels;
-      histChart.data.datasets[0].data = values;
-      histChart.update('none');
-    }
+    lastHistoryRows = rows;
+    renderHistChartFromCache(range);
 
     if (wasOffline) console.info('[VPS] Connection restored, historical chart repopulated.');
   } catch (err) {
     if (mySeq !== histRequestSeq) return; // stale failure, a newer request is already in flight/done
     vpsOnline = false;
-    setVpsBanner(true);
+    const originCheck = checkOriginAllowlist();
+    setVpsBanner(true, originCheck.allowed ? null :
+      `Origin "${originCheck.origin}" isn't in the VPS's allowed CORS list — open this from ${VPS_ALLOWED_ORIGINS.join(' or ')}.`);
     // leave the chart as-is (last known data) per spec — do not clear on transient failure
     console.warn('[VPS] fetch failed, staying in fallback mode:', err.message);
   } finally {
@@ -1347,6 +1501,19 @@ document.querySelectorAll('.range-btn').forEach(btn => {
     btn.classList.add('active');
     currentRange = btn.dataset.range;
     refreshHistoricalChart(currentRange);
+  });
+});
+
+// Weekly / All-Expiries metric-scope toggle for the historical chart — a
+// SEPARATE control from the 1D/7D/30D range toggle above (own class/handler
+// so the two groups' active-state don't clobber each other). Switching
+// scope re-renders instantly from the already-cached rows, no re-fetch.
+document.querySelectorAll('.scope-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.scope-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    histMetricScope = btn.dataset.scope;
+    renderHistChartFromCache(currentRange);
   });
 });
 
@@ -1368,23 +1535,30 @@ function setLiveApiDelayed(state) {
 
 /* =========================================================================
    COMPOSITE HEADLINE SIGNAL — smart decision engine
-   Pure rule-based function: reads Total GEX, 24h trend, DEX, Spot vs. Zero
-   Gamma, Spot vs. Max Pain, and the expiry countdown, and collapses them
-   into exactly one of five states: green / yellow / orange / red / neutral.
+   Now WEEKLY-PRIMARY: totalGex/dex/zeroGamma/maxPain passed in are all
+   scoped to the nearest Friday 08:00 UTC expiry (the "weekly" chain), per
+   the intraday spot-trading redesign. All-Expiries figures are passed in
+   separately (allExpiriesTotalGex/allExpiriesDex) and are used ONLY for the
+   conflict check below and for the secondary-context notes rendered under
+   the banner — they never drive the primary Green/Yellow/Red/Orange result
+   on their own.
+   Reads Weekly Total GEX, 24h trend, Weekly DEX, Spot vs. Weekly Zero
+   Gamma, Spot vs. Weekly Max Pain, and the expiry countdown, and collapses
+   them into exactly one of five states: green / yellow / orange / red / neutral.
    Deliberately simple if/else priority chain, no scoring or probabilities.
    ========================================================================= */
-const NEAR_EXPIRY_HOURS = 24;   // "near expiry" threshold for the Yellow max-pain-distance rule
-const MAXPAIN_FAR_PCT = 0.02;   // 2% away from Max Pain counts as "too far" when near expiry
+const NEAR_EXPIRY_HOURS = 48;   // "near expiry" threshold for the Yellow Weekly-Max-Pain-distance rule
+const MAXPAIN_FAR_PCT = 0.02;   // 2% away from Weekly Max Pain counts as "too far" when near expiry
 
 // Session memory (not full tick history) for detecting a same-session
-// "Spot just broke below Zero Gamma" cross at 60s refresh-cycle resolution.
+// "Spot just broke below Weekly Zero Gamma" cross at 60s refresh-cycle resolution.
 let prevSpotAboveZeroGamma = null;
 
-// Zero Gamma distance tiers — the % distance between spot and Zero Gamma is
-// now a primary, graduated factor in the headline signal rather than a
+// Zero Gamma distance tiers — the % distance between spot and Weekly Zero
+// Gamma is a primary, graduated factor in the headline signal rather than a
 // simple above/below gate. Thresholds are on the *banner logic* side; the
 // cheat sheet's "deep cushion" / "thin cushion" notes use their own,
-// separate, more conservative thresholds (see renderPriceLevels).
+// separate, more conservative thresholds (see renderZeroGammaDetail).
 const ZG_SAFE_PCT = 5;      // >5% away = "safely" on that side
 const ZG_EDGE_PCT = 2;      // <2% = "at the edge"; 2-5% = "approaching danger zone"
 
@@ -1402,7 +1576,23 @@ function computeZeroGammaDistance(spot, zeroGamma) {
   return { pctDistance, absPct, above, tier };
 }
 
-function generateHeadlineSignal({ totalGex, trendInfo, dex, spot, zeroGamma, maxPain }) {
+// True when the Weekly and All-Expiries readings disagree in sign on either
+// Total GEX or DEX — a direct trigger for the Orange "conflict" condition.
+function haveWeeklyAllExpiriesConflict(weeklyTotalGex, weeklyDex, allExpiriesTotalGex, allExpiriesDex) {
+  if (allExpiriesTotalGex !== null && allExpiriesTotalGex !== undefined && !Number.isNaN(allExpiriesTotalGex)) {
+    if (Math.sign(weeklyTotalGex) !== 0 && Math.sign(allExpiriesTotalGex) !== 0 &&
+        Math.sign(weeklyTotalGex) !== Math.sign(allExpiriesTotalGex)) return true;
+  }
+  if (allExpiriesDex !== null && allExpiriesDex !== undefined && !Number.isNaN(allExpiriesDex) &&
+      dexDefined(weeklyDex)) {
+    if (Math.sign(weeklyDex) !== 0 && Math.sign(allExpiriesDex) !== 0 &&
+        Math.sign(weeklyDex) !== Math.sign(allExpiriesDex)) return true;
+  }
+  return false;
+}
+function dexDefined(v) { return v !== null && v !== undefined && !Number.isNaN(v); }
+
+function generateHeadlineSignal({ totalGex, trendInfo, dex, spot, zeroGamma, maxPain, allExpiriesTotalGex = null, allExpiriesDex = null }) {
   const trend = trendInfo ? trendInfo.trend : null;
   const partialNote = (trendInfo && trendInfo.limited) ? 'Partial data. No 24h history.' : null;
 
@@ -1446,6 +1636,13 @@ function generateHeadlineSignal({ totalGex, trendInfo, dex, spot, zeroGamma, max
     return {
       state: 'orange', label: 'TRANSITION / HIGH RISK', summary: ORANGE_SUMMARY,
       why: ['Total GEX just flipped from positive to negative within the last 2 hours.'],
+      partialNote, zeroGammaNote
+    };
+  }
+  if (haveWeeklyAllExpiriesConflict(totalGex, dex, allExpiriesTotalGex, allExpiriesDex)) {
+    return {
+      state: 'orange', label: 'TRANSITION / HIGH RISK', summary: ORANGE_SUMMARY,
+      why: ['Weekly and All-Expiries signals disagree — conflicting read on dealer positioning.'],
       partialNote, zeroGammaNote
     };
   }
@@ -1672,20 +1869,23 @@ async function refreshGexRatioBaseline() {
   try {
     const rows = await fetchVpsHistory('7d');
     if (mySeq !== gexRatioRequestSeq) return;
-    // The VPS's history rows may or may not include a per-row spot price.
-    // When absent, we approximate using the current spot rather than skip
-    // the row entirely — noted as an approximation, not exact history.
+    // Ratio baseline tracks WEEKLY Total GEX / spot, consistent with the
+    // banner's weekly-primary focus. spot_price is now provided per-row by
+    // the VPS, so this is exact history — the current-spot approximation is
+    // kept only as a fallback for older/malformed rows missing that field.
+    let usedApproxSpot = false;
     const ratios = rows
       .map(r => {
-        const gexVal = r.gex ?? r.total_gex ?? r.value ?? null;
-        const spotVal = r.spot ?? r.price ?? r.btc_price ?? lastGoodSpot;
+        const gexVal = extractRowMetric(r, 'weekly', 'total_gex');
+        let spotVal = extractRowSpot(r);
+        if (spotVal === null) { spotVal = lastGoodSpot; usedApproxSpot = true; }
         if (gexVal === null || !spotVal) return null;
         return gexVal / spotVal;
       })
       .filter(v => v !== null && Number.isFinite(v));
     if (ratios.length) {
       gexRatioBaseline = ratios.reduce((s, v) => s + v, 0) / ratios.length;
-      gexRatioBaselineLimited = rows.every(r => r.spot === undefined && r.price === undefined && r.btc_price === undefined);
+      gexRatioBaselineLimited = usedApproxSpot;
     }
   } catch (err) {
     // Keep whatever baseline we already have rather than wiping it on a transient failure.
@@ -1756,7 +1956,33 @@ function confirmSignal(rawSignal) {
   return { display: lastConfirmedSignal, pendingNote: 'Signal pending confirmation...' };
 }
 
-function renderRegime(totalGex, trendInfo, dex, spot, zeroGamma, maxPain) {
+// Secondary-context notes: informational only, shown under the banner,
+// never affect the banner's color/state directly (the sign-mismatch part of
+// this is ALSO checked independently inside generateHeadlineSignal for the
+// Orange "conflict" condition — this function just renders the notes).
+function buildSecondaryContextNotes({ weeklyTotalGex, weeklyDex, weeklyZeroGamma, allExpiriesTotalGex, allExpiriesDex, allExpiriesZeroGamma }) {
+  const notes = [];
+  if (weeklyTotalGex !== null && weeklyTotalGex > 0 &&
+      allExpiriesTotalGex !== null && allExpiriesTotalGex !== undefined && allExpiriesTotalGex < 0) {
+    notes.push('Macro GEX negative. Weekly strength may be temporary.');
+  }
+  if (weeklyDex !== null && weeklyDex > 0 &&
+      allExpiriesDex !== null && allExpiriesDex !== undefined && allExpiriesDex < 0) {
+    notes.push('Macro dealer bias negative. Take profits quickly.');
+  }
+  // "Far below" is a judgment call not given an exact number in spec — using
+  // 10% as a reasonable, documented threshold for "materially different floor."
+  if (weeklyZeroGamma !== null && weeklyZeroGamma !== undefined &&
+      allExpiriesZeroGamma !== null && allExpiriesZeroGamma !== undefined && weeklyZeroGamma !== 0) {
+    const pctBelow = (weeklyZeroGamma - allExpiriesZeroGamma) / weeklyZeroGamma;
+    if (pctBelow > 0.10) {
+      notes.push('Macro floor far below. Long-term structure still supportive.');
+    }
+  }
+  return notes;
+}
+
+function renderRegime(totalGex, trendInfo, dex, spot, zeroGamma, maxPain, allExpiriesTotalGex = null, allExpiriesDex = null, allExpiriesZeroGamma = null) {
   const banner = document.getElementById('regimeBanner');
   const title = document.getElementById('regimeTitle');
   const summaryEl = document.getElementById('regimeSummary');
@@ -1772,6 +1998,7 @@ function renderRegime(totalGex, trendInfo, dex, spot, zeroGamma, maxPain) {
   const dangerNoteEl = document.getElementById('regimeDangerNote');
   const pendingNoteEl = document.getElementById('regimePendingNote');
   const ratioEl = document.getElementById('regimeGexRatio');
+  const secondaryNoteEl = document.getElementById('regimeSecondaryNote');
   const csRegime = document.getElementById('cs_regime');
   const action = document.getElementById('traderAction');
 
@@ -1783,7 +2010,7 @@ function renderRegime(totalGex, trendInfo, dex, spot, zeroGamma, maxPain) {
 
   // Base rule engine, then layered contextual modifiers, then the
   // 2-cycle confirmation gate before anything actually reaches the banner.
-  let signal = generateHeadlineSignal({ totalGex, trendInfo, dex, spot, zeroGamma, maxPain });
+  let signal = generateHeadlineSignal({ totalGex, trendInfo, dex, spot, zeroGamma, maxPain, allExpiriesTotalGex, allExpiriesDex });
   signal = applySessionModifier(signal, { totalGex, dex, session });
   signal = applyMaxPainExtendedModifier(signal, { spot, maxPain, hoursToExpiry });
   signal = applyMacroEventModifier(signal);
@@ -1803,6 +2030,12 @@ function renderRegime(totalGex, trendInfo, dex, spot, zeroGamma, maxPain) {
   partialNoteEl.textContent = display.partialNote || '';
   pendingNoteEl.textContent = confirmed.pendingNote || '';
   dangerNoteEl.textContent = display.zeroGammaNote ? '⚠️ ' + display.zeroGammaNote : '';
+
+  const secondaryNotes = buildSecondaryContextNotes({
+    weeklyTotalGex: totalGex, weeklyDex: dex, weeklyZeroGamma: zeroGamma,
+    allExpiriesTotalGex, allExpiriesDex, allExpiriesZeroGamma
+  });
+  secondaryNoteEl.textContent = secondaryNotes.join(' ');
 
   const trendLabel = trendInfo.dataPoints > 0 ? trendInfo.trend + (trendInfo.isSharp ? ' (sharp)' : '') : 'Insufficient data';
   const changeLabel = trendInfo.change24h !== null ? fmtUsdSigned(trendInfo.change24h) : '--';
@@ -1827,15 +2060,11 @@ function renderRegime(totalGex, trendInfo, dex, spot, zeroGamma, maxPain) {
   }
 }
 
-function renderDex(dex) {
-  const dexEl = document.getElementById('cs_dex');
-  const noteEl = document.getElementById('dexNote');
-  dexEl.textContent = fmtUsdSigned(dex);
-  dexEl.className = 'v ' + (dex >= 0 ? 'pos' : 'neg');
-  noteEl.textContent = dex >= 0
-    ? 'Dealers net long. Buying dips is aligned with dealer hedging.'
-    : 'Dealers net short. Be cautious with long spot.';
-}
+/* =========================================================================
+   CHEAT SHEET — WEEKLY (primary) vs ALL-EXPIRIES (secondary/muted) TABLE
+   + coinciding-arrangement alignment notification (Weekly values only, since
+   Max Pain is inherently weekly-only anyway).
+   ========================================================================= */
 
 function renderTermStructure(chain, spot) {
   const buckets = computeGexByExpiryBucket(chain, spot);
@@ -1850,27 +2079,42 @@ function renderTermStructure(chain, spot) {
   document.getElementById('termUpdated').textContent = 'updated ' + nowStr();
 }
 
-/* =========================================================================
-   CHEAT SHEET — PRICE LEVELS SECTION (Max Pain -> Call Wall -> Put Wall ->
-   Zero Gamma) + coinciding-arrangement alignment notification.
-   ========================================================================= */
-function setLevelRow(valueId, tagId, price, spot, nullLabel = '--') {
-  const valueEl = document.getElementById(valueId);
-  const tagEl = document.getElementById(tagId);
-  if (price === null || price === undefined || Number.isNaN(price)) {
-    valueEl.textContent = nullLabel;
-    tagEl.textContent = '--';
-    tagEl.className = 'level-tag';
-    return;
+// Fills one row's two cells: a "primary" (Weekly) cell with an optional
+// above/below-spot tag, and a "secondary" (All Expiries) cell shown muted.
+// `formatter` distinguishes dollar-exposure rows (fmtUsd) from price-level
+// rows (fmtPriceUsd, which also gets the above/below tag).
+function setWeeklyRow(primaryId, secondaryId, weeklyVal, allVal, spot, { isPrice, nullLabel = '--' } = {}) {
+  const primaryEl = document.getElementById(primaryId);
+  const secondaryEl = document.getElementById(secondaryId);
+  const fmt = isPrice ? fmtPriceUsd : fmtUsdSigned;
+
+  if (weeklyVal === null || weeklyVal === undefined || Number.isNaN(weeklyVal)) {
+    primaryEl.innerHTML = nullLabel;
+    primaryEl.className = 'wt-primary';
+  } else {
+    let html = fmt(weeklyVal);
+    primaryEl.className = 'wt-primary ' + (weeklyVal >= 0 ? 'pos' : 'neg');
+    if (isPrice && spot) {
+      const above = weeklyVal > spot;
+      html += `<span class="wt-tag">${above ? 'Above Spot' : 'Below Spot'}</span>`;
+      primaryEl.className = 'wt-primary'; // price levels aren't pos/neg-colored, just the tag conveys direction
+    }
+    primaryEl.innerHTML = html;
   }
-  valueEl.textContent = fmtPriceUsd(price);
-  const above = price > spot;
-  tagEl.textContent = above ? 'Above Spot' : 'Below Spot';
-  tagEl.className = 'level-tag ' + (above ? 'above' : 'below');
+
+  if (secondaryEl) {
+    if (allVal === null || allVal === undefined || Number.isNaN(allVal)) {
+      secondaryEl.textContent = '--';
+      secondaryEl.className = 'wt-secondary';
+    } else {
+      secondaryEl.textContent = fmt(allVal);
+      secondaryEl.className = 'wt-secondary ' + (allVal >= 0 ? 'pos' : 'neg');
+    }
+  }
 }
 
-// True only when all four levels are known AND their price values coincide
-// with the fixed display order: Max Pain > Call Wall > Put Wall > Zero Gamma.
+// True only when all four Weekly levels are known AND coincide with the
+// fixed display order: Max Pain > Call Wall > Put Wall > Zero Gamma.
 function checkLevelAlignment(maxPain, callWall, putWall, zeroGamma) {
   if ([maxPain, callWall, putWall, zeroGamma].some(v => v === null || v === undefined || Number.isNaN(v))) {
     return false;
@@ -1878,17 +2122,29 @@ function checkLevelAlignment(maxPain, callWall, putWall, zeroGamma) {
   return maxPain > callWall && callWall > putWall && putWall > zeroGamma;
 }
 
-function renderPriceLevels(spot, { maxPain, callWall, putWall, zeroGamma }) {
-  setLevelRow('cs_maxpain', 'cs_maxpain_tag', maxPain, spot);
-  setLevelRow('cs_callwall', 'cs_callwall_tag', callWall, spot);
-  setLevelRow('cs_putwall', 'cs_putwall_tag', putWall, spot);
-  setLevelRow('cs_zerogamma', 'cs_zerogamma_tag', zeroGamma, spot, 'no flip detected');
-  renderZeroGammaDetail(spot, zeroGamma);
+function renderWeeklyTable(spot, weekly, allExpiries) {
+  setWeeklyRow('wt_totalgex_weekly', 'wt_totalgex_all', weekly.totalGex, allExpiries.totalGex, spot, { isPrice: false });
+  setWeeklyRow('wt_dex_weekly', 'wt_dex_all', weekly.dex, allExpiries.dex, spot, { isPrice: false });
+  setWeeklyRow('wt_callwall_weekly', 'wt_callwall_all', weekly.callWall, allExpiries.callWall, spot, { isPrice: true });
+  setWeeklyRow('wt_putwall_weekly', 'wt_putwall_all', weekly.putWall, allExpiries.putWall, spot, { isPrice: true });
+  setWeeklyRow('wt_zerogamma_weekly', 'wt_zerogamma_all', weekly.zeroGamma, allExpiries.zeroGamma, spot, { isPrice: true, nullLabel: 'no flip detected' });
+  setWeeklyRow('wt_maxpain_weekly', null, weekly.maxPain, null, spot, { isPrice: true }); // Max Pain has no All-Expiries counterpart — filled statically in HTML
 
-  const aligned = checkLevelAlignment(maxPain, callWall, putWall, zeroGamma);
+  const dexNoteEl = document.getElementById('dexNote');
+  if (weekly.dex === null || weekly.dex === undefined || Number.isNaN(weekly.dex)) {
+    dexNoteEl.textContent = 'Dealer Delta note will appear once live data loads.';
+  } else {
+    dexNoteEl.textContent = weekly.dex >= 0
+      ? 'Dealers net long (Weekly). Buying dips is aligned with dealer hedging.'
+      : 'Dealers net short (Weekly). Be cautious with long spot.';
+  }
+
+  renderZeroGammaDetail(spot, weekly.zeroGamma);
+
+  const aligned = checkLevelAlignment(weekly.maxPain, weekly.callWall, weekly.putWall, weekly.zeroGamma);
   document.getElementById('levelAlignBanner').style.display = aligned ? 'block' : 'none';
 
-  renderSpreadIndicator(spot, callWall, putWall);
+  renderSpreadIndicator(spot, weekly.callWall, weekly.putWall);
 }
 
 // Cheat-sheet-only cushion thresholds — deliberately more conservative than
@@ -2003,36 +2259,50 @@ async function refreshLiveData() {
     vpsSnapshotFallbackActive = false;
     document.getElementById('gexUpdated').textContent = 'updated ' + nowStr();
 
-    const gexByStrike = computeGexByStrike(chain, effectiveSpot);
-    let totalGex = 0;
-    for (const [, v] of gexByStrike) totalGex += v;
+    // --- All-Expiries (secondary context) — unchanged existing calculation ---
+    const gexByStrikeAll = computeGexByStrike(chain, effectiveSpot);
+    let totalGexAll = 0;
+    for (const [, v] of gexByStrikeAll) totalGexAll += v;
+    const zeroGammaAll = findZeroGammaLevel(chain, effectiveSpot);
+    const { putWall: putWallAll, callWall: callWallAll } = findWalls(gexByStrikeAll, effectiveSpot);
+    const dexAll = computeTotalDex(chain, effectiveSpot);
+    const maxPain = findMaxPain(chain, effectiveSpot); // already internally filters to nearest Friday only
 
-    const zeroGamma = findZeroGammaLevel(chain, effectiveSpot);
-    const { putWall, callWall } = findWalls(gexByStrike, effectiveSpot);
-    const maxPain = findMaxPain(chain, effectiveSpot);
-    const dex = computeTotalDex(chain, effectiveSpot);
+    // --- Weekly (nearest Friday 08:00 UTC) — now PRIMARY for the banner and cheat sheet ---
+    const weeklyChain = filterToNearestWeeklyExpiry(chain);
+    const gexByStrikeWeekly = computeGexByStrike(weeklyChain, effectiveSpot);
+    let totalGexWeekly = 0;
+    for (const [, v] of gexByStrikeWeekly) totalGexWeekly += v;
+    const zeroGammaWeekly = findZeroGammaLevel(weeklyChain, effectiveSpot);
+    const { putWall: putWallWeekly, callWall: callWallWeekly } = findWalls(gexByStrikeWeekly, effectiveSpot);
+    const dexWeekly = computeTotalDex(weeklyChain, effectiveSpot);
 
-    // Feature 3: record this snapshot for the rolling-window trend calc,
-    // then classify the regime using that trend rather than just the sign.
-    recordSessionGexSnapshot(totalGex);
-    const trendInfo = computeTrendInfo(totalGex);
-    renderRegime(totalGex, trendInfo, dex, effectiveSpot, zeroGamma, maxPain);
-    updateGexChart(gexByStrike, effectiveSpot, zeroGamma);
+    // Feature 3: rolling-window trend now tracks WEEKLY Total GEX going
+    // forward (the session-fallback buffer switches immediately; VPS-sourced
+    // history reflects whatever your VPS has historically logged, which may
+    // still be a blended figure until its own logging is updated).
+    recordSessionGexSnapshot(totalGexWeekly);
+    const trendInfo = computeTrendInfo(totalGexWeekly);
+    renderRegime(totalGexWeekly, trendInfo, dexWeekly, effectiveSpot, zeroGammaWeekly, maxPain, totalGexAll, dexAll, zeroGammaAll);
 
-    // Feature 2: Dealer Delta Exposure
-    renderDex(dex);
+    // Strike Map chart stays All-Expiries (unchanged) — it's a visual of the
+    // full chain, not a banner/cheat-sheet decision input.
+    updateGexChart(gexByStrikeAll, effectiveSpot, zeroGammaAll);
 
-    // Feature 1: GEX term structure by expiry bucket
+    // Feature 1: GEX term structure by expiry bucket (unchanged, All-Expiries breakdown)
     renderTermStructure(chain, effectiveSpot);
 
-    document.getElementById('gammaSupportVal').textContent = putWall ? fmtPrice(putWall) : '--';
-    document.getElementById('gammaResistVal').textContent = callWall ? fmtPrice(callWall) : '--';
+    document.getElementById('gammaSupportVal').textContent = putWallAll ? fmtPrice(putWallAll) : '--';
+    document.getElementById('gammaResistVal').textContent = callWallAll ? fmtPrice(callWallAll) : '--';
 
-    // Cheat sheet Price Levels section (fixed order Max Pain -> Call Wall ->
-    // Put Wall -> Zero Gamma) + the coinciding-arrangement alignment check.
-    renderPriceLevels(effectiveSpot, { maxPain, callWall, putWall, zeroGamma });
+    // Cheat sheet: Weekly (primary) vs All-Expiries (secondary/muted) table,
+    // plus the Weekly-only alignment check, Zero Gamma distance, and spread.
+    renderWeeklyTable(effectiveSpot,
+      { totalGex: totalGexWeekly, dex: dexWeekly, callWall: callWallWeekly, putWall: putWallWeekly, zeroGamma: zeroGammaWeekly, maxPain },
+      { totalGex: totalGexAll, dex: dexAll, callWall: callWallAll, putWall: putWallAll, zeroGamma: zeroGammaAll }
+    );
 
-    lastLoggedMetrics = { totalGex, dex, zeroGamma, maxPain, putWall, callWall };
+    lastLoggedMetrics = { totalGex: totalGexWeekly, dex: dexWeekly, zeroGamma: zeroGammaWeekly, maxPain, putWall: putWallWeekly, callWall: callWallWeekly };
   } else if (chainErr && effectiveSpot) {
     // Deribit is unreachable. Rather than freeze every GEX-derived panel,
     // fall back to your VPS's /api/gex/latest snapshot — it's your own
@@ -2048,11 +2318,15 @@ async function refreshLiveData() {
 
         recordSessionGexSnapshot(snap.totalGex);
         const trendInfo = computeTrendInfo(snap.totalGex);
-        renderRegime(snap.totalGex, trendInfo, snap.dex, effectiveSpot, snap.zeroGamma, snap.maxPain);
-        renderDex(snap.dex ?? 0);
-        renderPriceLevels(effectiveSpot, {
-          maxPain: snap.maxPain, callWall: snap.callWall, putWall: snap.putWall, zeroGamma: snap.zeroGamma
-        });
+        // A single VPS snapshot has no Weekly/All-Expiries split — its values
+        // are treated as the Weekly figures (consistent with Max Pain always
+        // being weekly-only), with All-Expiries passed as null (secondary
+        // column shows "--", conflict-check and secondary notes trivially skip).
+        renderRegime(snap.totalGex, trendInfo, snap.dex, effectiveSpot, snap.zeroGamma, snap.maxPain, null, null, null);
+        renderWeeklyTable(effectiveSpot,
+          { totalGex: snap.totalGex, dex: snap.dex, callWall: snap.callWall, putWall: snap.putWall, zeroGamma: snap.zeroGamma, maxPain: snap.maxPain },
+          { totalGex: null, dex: null, callWall: null, putWall: null, zeroGamma: null }
+        );
 
         lastLoggedMetrics = {
           totalGex: snap.totalGex, dex: snap.dex, zeroGamma: snap.zeroGamma,
