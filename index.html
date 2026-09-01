@@ -657,7 +657,19 @@ let showIvWalls = true;
 let lastFetchedChain = null;
 let lastEffectiveSpotForMap = null;
 let lastWeeklyZeroGamma = null;
+let lastIvWallSnapshot = null; // normalized /api/gex/latest — IV Walls now come from here, not local computation
 let liveApiDelayed = false;
+
+// Backend only provides IV Walls for 'weekly' and 'all_expiries' scopes —
+// there's no monthly/quarterlyPlus-specific iv_wall/low_iv_wall field, so
+// those two Strike Map filter options simply show no IV Wall (not an error,
+// just data the backend doesn't break out at that granularity).
+function getIvWallsForFilter(filterKey) {
+  if (!lastIvWallSnapshot) return { ivHigh: null, ivLow: null };
+  if (filterKey === 'weekly') return { ivHigh: lastIvWallSnapshot.weekly.ivWall, ivLow: lastIvWallSnapshot.weekly.lowIvWall };
+  if (filterKey === 'all') return { ivHigh: lastIvWallSnapshot.allExpiries.ivWall, ivLow: lastIvWallSnapshot.allExpiries.lowIvWall };
+  return { ivHigh: null, ivLow: null };
+}
 
 let gexChart = null;
 let histChart = null;
@@ -1020,54 +1032,16 @@ function filterChainByExpiryBucket(chain, filterKey) {
 }
 
 /* =========================================================================
-   IV WALLS — strikes with locally unusual implied volatility.
-   Aggregation method (documented, deliberately simple): for each strike,
-   average the mark_iv of every option at that strike within the currently
-   filtered chain (calls and puts, all expiries present in that filter,
-   pooled together). Averaging — rather than picking a "primary" side —
-   smooths call/put IV skew without needing an ATM-priority branch, and is
-   robust to a strike having only one side quoted.
+   IV WALLS — now sourced directly from the backend's /api/gex/latest
+   response (weekly.iv_wall / weekly.low_iv_wall / all_expiries.iv_wall /
+   all_expiries.low_iv_wall), NOT computed locally. The backend defines
+   iv_wall as the strike with the highest mark_iv x open_interest, and
+   low_iv_wall as the strike with the lowest — both are plain strike-price
+   numbers, matching put_wall/call_wall/zero_gamma's existing shape. See
+   fetchIvWallSnapshot() and normalizeVpsSnapshot() below for the extraction.
+   Older snapshots may have these as null — treated as "no wall available"
+   and skipped, never as an error.
    ========================================================================= */
-function computeIvByStrike(chain) {
-  const sums = new Map(); // strike -> { sum, count }
-  for (const opt of chain) {
-    if (!opt.iv || opt.iv <= 0) continue;
-    const entry = sums.get(opt.strike) || { sum: 0, count: 0 };
-    entry.sum += opt.iv;
-    entry.count += 1;
-    sums.set(opt.strike, entry);
-  }
-  const byStrike = new Map();
-  for (const [strike, { sum, count }] of sums) byStrike.set(strike, sum / count);
-  return byStrike; // Map<strike, avgIv> (decimal, e.g. 0.65 = 65%)
-}
-
-// Finds the single most extreme local maximum ("IV High") and local minimum
-// ("IV Low") in the IV-by-strike curve, sorted by strike. A strike only
-// qualifies as a local extremum if it has both a lower- and a higher-strike
-// neighbor to compare against in the set — so the lowest and highest
-// strikes present can never themselves be flagged (a standard, documented
-// limitation of simple neighbor-comparison extremum detection). Among all
-// qualifying local maxima/minima, the single most extreme of each is
-// reported, matching the singular "IV High" / "IV Low" labels on the chart.
-function findIvWalls(ivByStrike) {
-  const strikes = [...ivByStrike.keys()].sort((a, b) => a - b);
-  if (strikes.length < 3) return { ivHigh: null, ivHighVal: null, ivLow: null, ivLowVal: null };
-
-  let ivHigh = null, ivHighVal = -Infinity;
-  let ivLow = null, ivLowVal = Infinity;
-  for (let i = 1; i < strikes.length - 1; i++) {
-    const prev = ivByStrike.get(strikes[i - 1]);
-    const cur = ivByStrike.get(strikes[i]);
-    const next = ivByStrike.get(strikes[i + 1]);
-    if (cur > prev && cur > next && cur > ivHighVal) { ivHighVal = cur; ivHigh = strikes[i]; }
-    if (cur < prev && cur < next && cur < ivLowVal) { ivLowVal = cur; ivLow = strikes[i]; }
-  }
-  return {
-    ivHigh, ivHighVal: ivHigh !== null ? ivHighVal : null,
-    ivLow, ivLowVal: ivLow !== null ? ivLowVal : null
-  };
-}
 
 function computeGexByExpiryBucket(chain, spot) {
   const boundaries = computeExpiryBucketBoundaries();
@@ -1384,34 +1358,50 @@ function findNearestLabelIndex(strikesSorted, target) {
 
 const EXPIRY_FILTER_LABELS = { weekly: 'Weekly', monthly: 'Monthly', quarterlyPlus: 'Quarterly+', all: 'All Expiries' };
 
-function fmtIvWallsText(ivWalls) {
-  const high = ivWalls.ivHigh !== null ? `High ${fmtPriceUsd(ivWalls.ivHigh)} (${(ivWalls.ivHighVal * 100).toFixed(1)}% IV)` : 'High --';
-  const low = ivWalls.ivLow !== null ? `Low ${fmtPriceUsd(ivWalls.ivLow)} (${(ivWalls.ivLowVal * 100).toFixed(1)}% IV)` : 'Low --';
+// No % IV value here anymore — the backend gives us the winning strike
+// (highest/lowest mark_iv x OI) but not the raw IV number itself, so the
+// display is strike-only. Monthly/Quarterly+ show "not available from
+// backend" rather than "--", since that's a data-availability limitation,
+// not a "no wall found" result.
+function fmtIvWallsText(ivWalls, filterKey) {
+  if (filterKey === 'monthly' || filterKey === 'quarterlyPlus') {
+    return 'not available from backend for this scope';
+  }
+  const high = ivWalls.ivHigh !== null ? `High ${fmtPriceUsd(ivWalls.ivHigh)}` : 'High --';
+  const low = ivWalls.ivLow !== null ? `Low ${fmtPriceUsd(ivWalls.ivLow)}` : 'Low --';
   return `${high} · ${low}`;
+}
+
+// Updates just the two IV Walls text lines (Strike Map summary + Cheat
+// Sheet) without touching the chart — used by the Deribit-outage VPS
+// snapshot fallback, where there's no per-strike chain to redraw bars from.
+function renderIvWallsDisplayOnly() {
+  const ivWalls = getIvWallsForFilter(strikeMapExpiryFilter);
+  const filterLabel = EXPIRY_FILTER_LABELS[strikeMapExpiryFilter];
+  const ivText = fmtIvWallsText(ivWalls, strikeMapExpiryFilter);
+  document.getElementById('ivWallsSummary').textContent = `IV Walls (${filterLabel}): ${ivText}`;
+  document.getElementById('ivWallsCheatLine').textContent = `IV Walls (${filterLabel}): ${ivText}`;
 }
 
 // Recomputes and redraws the Strike Map (GEX bars, walls, IV walls) from
 // the already-fetched chain — used both by the 60s live refresh and by the
 // filter/toggle click handlers, so switching controls is instant and needs
-// no new network call.
+// no new network call. IV Walls themselves come from the backend snapshot
+// (lastIvWallSnapshot), not from any local computation on the chain.
 function renderStrikeMapFromCache() {
   if (!lastFetchedChain || !lastEffectiveSpotForMap) return;
 
   const filtered = filterChainByExpiryBucket(lastFetchedChain, strikeMapExpiryFilter);
   const gexByStrikeFiltered = computeGexByStrike(filtered, lastEffectiveSpotForMap);
   const { putWall, callWall } = findWalls(gexByStrikeFiltered, lastEffectiveSpotForMap);
-  const ivByStrike = computeIvByStrike(filtered);
-  const ivWalls = findIvWalls(ivByStrike);
+  const ivWalls = getIvWallsForFilter(strikeMapExpiryFilter);
 
   updateGexChart(gexByStrikeFiltered, lastEffectiveSpotForMap, lastWeeklyZeroGamma, ivWalls, showIvWalls);
 
   document.getElementById('gammaSupportVal').textContent = putWall ? fmtPrice(putWall) : '--';
   document.getElementById('gammaResistVal').textContent = callWall ? fmtPrice(callWall) : '--';
 
-  const filterLabel = EXPIRY_FILTER_LABELS[strikeMapExpiryFilter];
-  const ivText = fmtIvWallsText(ivWalls);
-  document.getElementById('ivWallsSummary').textContent = `IV Walls (${filterLabel}): ${ivText}`;
-  document.getElementById('ivWallsCheatLine').textContent = `IV Walls (${filterLabel}): ${ivText}`;
+  renderIvWallsDisplayOnly();
 }
 
 function initHistChart() {
@@ -1578,17 +1568,38 @@ async function fetchVpsLatest() {
 // variants) since the exact schema isn't documented — any field genuinely
 // missing from your VPS's response is simply left null and treated as
 // "unavailable" everywhere downstream, the same way a live-calc miss is.
+// Normalizes /api/gex/latest into the real nested shape the backend
+// documented: { spot_price, weekly: {...}, all_expiries: {...} }. Each
+// scope's fields (including the new iv_wall/low_iv_wall) are plain numbers
+// (strike prices) or null when unavailable — never treated as an error.
 function normalizeVpsSnapshot(snap) {
   const num = (v) => (typeof v === 'number' && !Number.isNaN(v)) ? v : null;
+  const extractScope = (scope) => ({
+    totalGex: num(scope?.total_gex), dex: num(scope?.dex),
+    putWall: num(scope?.put_wall), callWall: num(scope?.call_wall),
+    zeroGamma: num(scope?.zero_gamma), maxPain: num(scope?.max_pain), // max_pain only exists on weekly
+    ivWall: num(scope?.iv_wall), lowIvWall: num(scope?.low_iv_wall)
+  });
   return {
-    totalGex: num(snap.total_gex ?? snap.totalGex ?? snap.gex),
-    zeroGamma: num(snap.zero_gamma ?? snap.zeroGamma),
-    putWall: num(snap.put_wall ?? snap.putWall),
-    callWall: num(snap.call_wall ?? snap.callWall),
-    maxPain: num(snap.max_pain ?? snap.maxPain),
-    dex: num(snap.dex ?? snap.dealer_delta ?? snap.dealerDelta),
-    spot: num(snap.spot ?? snap.price ?? snap.btc_price)
+    spot: num(snap.spot_price ?? snap.spot ?? snap.price ?? snap.btc_price),
+    weekly: extractScope(snap.weekly),
+    allExpiries: extractScope(snap.all_expiries)
   };
+}
+
+// Best-effort fetch of the IV Wall fields (and everything else in the
+// nested snapshot) from /api/gex/latest, used on every live-refresh cycle
+// — separate from the Deribit-outage fallback path below, which also calls
+// fetchVpsLatest() but only when Deribit itself is unreachable. Failures
+// here are silent/non-blocking: the rest of the dashboard runs on Deribit
+// data regardless, IV Walls just show nothing for this cycle.
+async function fetchIvWallSnapshot() {
+  try {
+    return normalizeVpsSnapshot(await fetchVpsLatest());
+  } catch (err) {
+    console.warn('[IV Walls] /api/gex/latest fetch failed this cycle, keeping last known walls:', err.message);
+    return null;
+  }
 }
 
 let histMetricScope = 'weekly'; // 'weekly' (default) | 'all_expiries' — which nested field feeds the chart
@@ -1710,18 +1721,24 @@ function setLiveApiDelayed(state) {
 }
 
 /* =========================================================================
-   COMPOSITE HEADLINE SIGNAL — smart decision engine
-   Now WEEKLY-PRIMARY: totalGex/dex/zeroGamma/maxPain passed in are all
-   scoped to the nearest Friday 08:00 UTC expiry (the "weekly" chain), per
-   the intraday spot-trading redesign. All-Expiries figures are passed in
-   separately (allExpiriesTotalGex/allExpiriesDex) and are used ONLY for the
-   conflict check below and for the secondary-context notes rendered under
-   the banner — they never drive the primary Green/Yellow/Red/Orange result
-   on their own.
-   Reads Weekly Total GEX, 24h trend, Weekly DEX, Spot vs. Weekly Zero
-   Gamma, Spot vs. Weekly Max Pain, and the expiry countdown, and collapses
-   them into exactly one of five states: green / yellow / orange / red / neutral.
-   Deliberately simple if/else priority chain, no scoring or probabilities.
+   COMPOSITE HEADLINE SIGNAL — hierarchical decision engine
+   Restructured around Spot Price as the central anchor. Every other level
+   is evaluated RELATIVE TO SPOT, in this fixed priority order:
+     1. Zero Gamma — regime boundary (above = safe regime possible, below = danger regime)
+     2. Put Wall   — primary support/floor, given special priority for downside risk
+     3. Call Wall / Max Pain — resistance/magnet context (folded into summary text;
+        Max Pain's own hard rule lives in the unchanged applyMaxPainExtendedModifier)
+     4. High/Low IV Walls — layered on top via applyIvWallHierarchyModifier,
+        evaluated relative to BOTH spot and Put Wall (see that function)
+   Still WEEKLY-PRIMARY: totalGex/dex/zeroGamma/putWall/maxPain passed in are
+   scoped to the nearest Friday 08:00 UTC expiry by default; the same logic
+   works unchanged if All-Expiries figures are passed in instead — weekly
+   remains the primary driver per the intraday redesign. All-Expiries
+   Total GEX/DEX are used only for the existing conflict check.
+   The "why" array is now a FIXED 3-slot structure — [Zero Gamma
+   relationship, Put Wall relationship, IV wall note (if any)] — for the
+   whole engine, rather than ad-hoc reason strings per branch, so any two
+   states are directly comparable and the logic stays easy to verify.
    ========================================================================= */
 const NEAR_EXPIRY_HOURS = 48;   // "near expiry" threshold for the Yellow Weekly-Max-Pain-distance rule
 const MAXPAIN_FAR_PCT = 0.02;   // 2% away from Weekly Max Pain counts as "too far" when near expiry
@@ -1729,28 +1746,6 @@ const MAXPAIN_FAR_PCT = 0.02;   // 2% away from Weekly Max Pain counts as "too f
 // Session memory (not full tick history) for detecting a same-session
 // "Spot just broke below Weekly Zero Gamma" cross at 60s refresh-cycle resolution.
 let prevSpotAboveZeroGamma = null;
-
-// Zero Gamma distance tiers — the % distance between spot and Weekly Zero
-// Gamma is a primary, graduated factor in the headline signal rather than a
-// simple above/below gate. Thresholds are on the *banner logic* side; the
-// cheat sheet's "deep cushion" / "thin cushion" notes use their own,
-// separate, more conservative thresholds (see renderZeroGammaDetail).
-const ZG_SAFE_PCT = 5;      // >5% away = "safely" on that side
-const ZG_EDGE_PCT = 2;      // <2% = "at the edge"; 2-5% = "approaching danger zone"
-
-// Distance from spot to Zero Gamma, signed (+ = spot above, - = spot below)
-// and bucketed into the three tiers used by the banner logic.
-function computeZeroGammaDistance(spot, zeroGamma) {
-  if (zeroGamma === null || zeroGamma === undefined || Number.isNaN(zeroGamma) || zeroGamma === 0 || !spot) return null;
-  const pctDistance = (spot - zeroGamma) / zeroGamma;
-  const absPct = Math.abs(pctDistance) * 100;
-  const above = pctDistance >= 0;
-  let tier;
-  if (absPct > ZG_SAFE_PCT) tier = 'safe';
-  else if (absPct >= ZG_EDGE_PCT) tier = 'approaching';
-  else tier = 'edge';
-  return { pctDistance, absPct, above, tier };
-}
 
 // True when the Weekly and All-Expiries readings disagree in sign on either
 // Total GEX or DEX — a direct trigger for the Orange "conflict" condition.
@@ -1768,7 +1763,23 @@ function haveWeeklyAllExpiriesConflict(weeklyTotalGex, weeklyDex, allExpiriesTot
 }
 function dexDefined(v) { return v !== null && v !== undefined && !Number.isNaN(v); }
 
-function generateHeadlineSignal({ totalGex, trendInfo, dex, spot, zeroGamma, maxPain, allExpiriesTotalGex = null, allExpiriesDex = null }) {
+// --- Step 1 & 2 of the hierarchy: standardized relationship descriptions,
+// always slots 1 and 2 of the "why" array regardless of which branch the
+// state itself came from. ---
+function describeZeroGammaRelationship(zgAbove, zeroGamma) {
+  if (zgAbove === null) return 'Zero Gamma level unavailable.';
+  return zgAbove
+    ? `Spot is above Zero Gamma ($${fmtPrice(zeroGamma)}) — safe regime possible.`
+    : `Spot is below Zero Gamma ($${fmtPrice(zeroGamma)}) — danger regime.`;
+}
+function describePutWallRelationship(pwAbove, putWall) {
+  if (pwAbove === null) return 'Put Wall level unavailable.';
+  return pwAbove
+    ? `Spot is above Put Wall ($${fmtPrice(putWall)}) — floor intact.`
+    : `Spot is below Put Wall ($${fmtPrice(putWall)}) — floor broken.`;
+}
+
+function generateHeadlineSignal({ totalGex, trendInfo, dex, spot, zeroGamma, putWall, maxPain, allExpiriesTotalGex = null, allExpiriesDex = null }) {
   const trend = trendInfo ? trendInfo.trend : null;
   const partialNote = (trendInfo && trendInfo.limited) ? 'Partial data. No 24h history.' : null;
 
@@ -1779,171 +1790,167 @@ function generateHeadlineSignal({ totalGex, trendInfo, dex, spot, zeroGamma, max
       state: 'neutral', label: 'INSUFFICIENT DATA / FLAT',
       summary: 'Data unclear. Size down or wait.',
       why: ['Live spot price or Total GEX is unavailable.'],
-      partialNote, zeroGammaNote: null
+      partialNote, floorBrokenNote: null
     };
   }
 
-  const zg = computeZeroGammaDistance(spot, zeroGamma);
-  const haveZeroGamma = zg !== null;
-  const spotAboveZeroGamma = haveZeroGamma ? zg.above : null;
+  // --- Step 1: Zero Gamma — regime boundary ---
+  const haveZeroGamma = zeroGamma !== null && zeroGamma !== undefined && !Number.isNaN(zeroGamma) && zeroGamma !== 0;
+  const zgAbove = haveZeroGamma ? spot > zeroGamma : null;
+
+  // --- Step 2: Put Wall — primary support, special priority for downside risk ---
+  const havePutWall = putWall !== null && putWall !== undefined && !Number.isNaN(putWall) && putWall !== 0;
+  const pwAbove = havePutWall ? spot > putWall : null;
+
   const haveDex = dex !== null && dex !== undefined && !Number.isNaN(dex);
+  const zeroGammaWhy = describeZeroGammaRelationship(zgAbove, zeroGamma);
+  const putWallWhy = describePutWallRelationship(pwAbove, putWall);
+  const baseWhy = [zeroGammaWhy, putWallWhy];
+  const floorBrokenNote = pwAbove === false ? 'Put Wall floor broken.' : null;
 
   // "Just crossed" detection at 60s resolution using session memory.
   let crossedBelowZeroGamma = false;
-  if (spotAboveZeroGamma !== null) {
-    if (prevSpotAboveZeroGamma === true && spotAboveZeroGamma === false) crossedBelowZeroGamma = true;
-    prevSpotAboveZeroGamma = spotAboveZeroGamma;
+  if (zgAbove !== null) {
+    if (prevSpotAboveZeroGamma === true && zgAbove === false) crossedBelowZeroGamma = true;
+    prevSpotAboveZeroGamma = zgAbove;
   }
 
+  // --- Step 3 context: Call Wall / Max Pain (Max Pain's hard rule lives in
+  // the unchanged applyMaxPainExtendedModifier; here it only feeds the
+  // existing Yellow "too far above Max Pain near expiry" check). ---
   const hoursToExpiry = (nextFridayExpiry().getTime() - Date.now()) / 3600000;
   const haveMaxPain = maxPain !== null && maxPain !== undefined && !Number.isNaN(maxPain) && maxPain !== 0;
   const pctAboveMaxPain = haveMaxPain ? (spot - maxPain) / maxPain : null;
   const tooFarAboveMaxPainNearExpiry =
     pctAboveMaxPain !== null && pctAboveMaxPain > MAXPAIN_FAR_PCT && hoursToExpiry < NEAR_EXPIRY_HOURS;
 
-  const zeroGammaNote = haveZeroGamma && zg.tier === 'approaching' ? 'Approaching danger zone near Zero Gamma (2-5%).'
-    : haveZeroGamma && zg.tier === 'edge' ? 'At the edge of Zero Gamma. Volatility imminent.'
-    : null;
-
   const ORANGE_SUMMARY = 'Market structure is shifting. Do not enter new positions. If in a trade, tighten stop losses immediately.';
+  const mk = (state, label, summary, extra) => ({ state, label, summary, why: [...baseWhy, extra].filter(Boolean).slice(0, 3), partialNote, floorBrokenNote });
 
-  // --- ORANGE: transition / high risk (checked first — most urgent/specific) ---
+  // --- Highest-priority ORANGE: transition events (unchanged mechanism) ---
   if (trendInfo && trendInfo.recentFlipFromPositive) {
-    return {
-      state: 'orange', label: 'TRANSITION / HIGH RISK', summary: ORANGE_SUMMARY,
-      why: ['Total GEX just flipped from positive to negative within the last 2 hours.'],
-      partialNote, zeroGammaNote
-    };
+    return mk('orange', 'TRANSITION / HIGH RISK', ORANGE_SUMMARY, 'Total GEX just flipped from positive to negative within the last 2 hours.');
   }
   if (haveWeeklyAllExpiriesConflict(totalGex, dex, allExpiriesTotalGex, allExpiriesDex)) {
-    return {
-      state: 'orange', label: 'TRANSITION / HIGH RISK', summary: ORANGE_SUMMARY,
-      why: ['Weekly and All-Expiries signals disagree — conflicting read on dealer positioning.'],
-      partialNote, zeroGammaNote
-    };
+    return mk('orange', 'TRANSITION / HIGH RISK', ORANGE_SUMMARY, 'Weekly and All-Expiries signals disagree — conflicting read on dealer positioning.');
   }
-  if (totalGex < 0 && trend === 'Rising' && spotAboveZeroGamma === true) {
-    return {
-      state: 'orange', label: 'TRANSITION / HIGH RISK', summary: ORANGE_SUMMARY,
-      why: ['Spot is above Zero Gamma while Total GEX is still negative.', '24h trend is rising — potential reversal building.'],
-      partialNote, zeroGammaNote
-    };
+  if (totalGex < 0 && trend === 'Rising' && zgAbove === true) {
+    return mk('orange', 'TRANSITION / HIGH RISK', ORANGE_SUMMARY, '24h trend is rising — potential reversal building.');
   }
   if (totalGex > 0 && crossedBelowZeroGamma) {
-    return {
-      state: 'orange', label: 'TRANSITION / HIGH RISK', summary: ORANGE_SUMMARY,
-      why: ['Total GEX is positive but Spot just broke below Zero Gamma.'],
-      partialNote, zeroGammaNote
-    };
-  }
-  // Positive GEX but the nearest flip point is actually above spot (i.e.
-  // spot is below Zero Gamma) — an internally conflicting read, never a
-  // clean Green or Yellow no matter how positive Total GEX looks.
-  if (totalGex > 0 && haveZeroGamma && !zg.above) {
-    return {
-      state: 'orange', label: 'TRANSITION / HIGH RISK', summary: ORANGE_SUMMARY,
-      why: ['Spot is below Zero Gamma while Total GEX reads positive — conflicting signal.'],
-      partialNote, zeroGammaNote
-    };
-  }
-  // <2% ("at the edge") never reads as a confident Green even with positive
-  // GEX — too close to the flip line for that.
-  if (totalGex > 0 && haveZeroGamma && zg.above && zg.tier === 'edge') {
-    return {
-      state: 'orange', label: 'TRANSITION / HIGH RISK', summary: ORANGE_SUMMARY,
-      why: ['At the edge of Zero Gamma (<2%). Volatility imminent despite positive Total GEX.'],
-      partialNote, zeroGammaNote
-    };
+    return mk('orange', 'TRANSITION / HIGH RISK', ORANGE_SUMMARY, 'Total GEX is positive but Spot just broke below Zero Gamma.');
   }
 
-  // --- GREEN: confirmed long zone (strict AND — every input must be known,
-  // aligned, and spot must be a SAFE distance (>5%) above Zero Gamma) ---
-  if (totalGex > 0 && (trend === 'Stable' || trend === 'Rising') && haveDex && dex > 0 &&
-      haveZeroGamma && zg.above && zg.tier === 'safe') {
-    return {
-      state: 'green', label: 'CONFIRMED LONG ZONE',
-      summary: 'Shock absorbers active. Dealers buying dips. Bias is up. Safe to look for entries or hold long.',
-      why: ['Total GEX is positive.', 'Dealer Delta is positive.', `Trend is ${trend.toLowerCase()}, spot >5% above Zero Gamma.`],
-      partialNote, zeroGammaNote
-    };
+  // --- Step 2, special priority: a broken Put Wall floor is evaluated
+  // BEFORE the plain Zero-Gamma/GEX-sign checks below — a floor break is
+  // treated as elevated risk on its own, independent of what GEX says. ---
+  if (pwAbove === false) {
+    if (totalGex > 0) {
+      return mk('orange', 'TRANSITION / HIGH RISK', ORANGE_SUMMARY, 'Floor broken while Total GEX still reads positive — conflicting signal.');
+    }
+    // totalGex <= 0 from here
+    if (zgAbove === false && (trend === 'Stable' || trend === 'Falling') && haveDex && dex < 0) {
+      return mk('red', 'NO FLY ZONE / EXIT LONGS',
+        'Dealers are short gamma and short delta with the floor broken. Volatility is expanding downward. Stay in cash or exit longs. Do not catch falling knives.',
+        null);
+    }
+    return mk('orange', 'TRANSITION / HIGH RISK', ORANGE_SUMMARY, 'Floor broken — high risk even without full trend/Dealer Delta confirmation.');
   }
 
-  // --- RED: no fly zone / exit longs (strict AND — spot below Zero Gamma at
-  // ANY distance counts, per the "nearest flip above spot" rule) ---
-  if (totalGex < 0 && (trend === 'Stable' || trend === 'Falling') && haveDex && dex < 0 &&
-      haveZeroGamma && !zg.above) {
-    return {
-      state: 'red', label: 'NO FLY ZONE / EXIT LONGS',
-      summary: 'Dealers are short gamma and short delta. Volatility is expanding downward. Stay in cash or exit longs. Do not catch falling knives.',
-      why: ['Total GEX is negative.', 'Dealer Delta is negative.', 'Spot is below Zero Gamma.'],
-      partialNote, zeroGammaNote
-    };
+  // --- From here, Put Wall floor is intact (pwAbove === true) or unknown (null) ---
+
+  // Positive GEX but below Zero Gamma while the floor is otherwise intact — still conflicting.
+  if (totalGex > 0 && zgAbove === false) {
+    return mk('orange', 'TRANSITION / HIGH RISK', ORANGE_SUMMARY, 'Spot below Zero Gamma while Total GEX reads positive — conflicting signal.');
   }
 
-  // --- Negative GEX that didn't confirm Red: tier-driven Orange fallbacks ---
-  if (totalGex < 0 && haveZeroGamma) {
-    if (!zg.above) {
-      return {
-        state: 'orange', label: 'TRANSITION / HIGH RISK', summary: ORANGE_SUMMARY,
-        why: ['Spot is below Zero Gamma with negative Total GEX, but trend or Dealer Delta isn\u2019t fully confirming yet.'],
-        partialNote, zeroGammaNote
-      };
-    }
-    if (zg.tier === 'edge') {
-      return {
-        state: 'orange', label: 'TRANSITION / HIGH RISK', summary: ORANGE_SUMMARY,
-        why: ['At the edge of Zero Gamma (<2%) with negative Total GEX. Volatility imminent.'],
-        partialNote, zeroGammaNote
-      };
-    }
-    if (zg.tier === 'approaching') {
-      return {
-        state: 'orange', label: 'TRANSITION / HIGH RISK', summary: ORANGE_SUMMARY,
-        why: ['Approaching danger zone near Zero Gamma (2-5%) with negative Total GEX.'],
-        partialNote, zeroGammaNote
-      };
-    }
-    // else: safe tier, comfortably above Zero Gamma despite negative GEX,
-    // and trend isn't Rising (that case was already caught above) — falls
-    // through to the conflicting/neutral default at the bottom.
+  // --- GREEN: safe regime + floor intact + clean bullish GEX/DEX/trend ---
+  if (totalGex > 0 && zgAbove === true && pwAbove === true &&
+      (trend === 'Stable' || trend === 'Rising') && haveDex && dex > 0) {
+    return mk('green', 'CONFIRMED LONG ZONE',
+      'Shock absorbers active. Dealers buying dips. Floor intact. Bias is up. Safe to look for entries or hold long.', null);
   }
 
-  // --- YELLOW: cautious long / drifting (positive GEX, but not clean enough for Green) ---
-  if (totalGex > 0) {
-    const yellowReasons = [];
-    if (haveDex && dex < 0) yellowReasons.push('Dealer Delta is negative.');
-    if (trend === 'Falling') yellowReasons.push('24h trend is falling.');
-    if (tooFarAboveMaxPainNearExpiry) {
-      yellowReasons.push(`Spot is ${(pctAboveMaxPain * 100).toFixed(1)}% above Max Pain with expiry in ${hoursToExpiry.toFixed(1)}h.`);
+  // --- YELLOW: safe regime + floor intact, but not clean enough for Green ---
+  if (totalGex > 0 && zgAbove === true && pwAbove === true) {
+    let reason = null;
+    if (haveDex && dex < 0) reason = 'Dealer Delta is negative.';
+    else if (trend === 'Falling') reason = '24h trend is falling.';
+    else if (tooFarAboveMaxPainNearExpiry) reason = `Spot is ${(pctAboveMaxPain * 100).toFixed(1)}% above Max Pain with expiry in ${hoursToExpiry.toFixed(1)}h.`;
+    if (reason) {
+      return mk('yellow', 'CAUTIOUS LONG / DRIFTING',
+        'Calm market but the wind is not at your back. Rallies may be sold. Take partial profits or wait for a better entry.', reason);
     }
-    if (haveZeroGamma && zg.tier === 'approaching') yellowReasons.push(zeroGammaNote);
-    if (yellowReasons.length) {
-      return {
-        state: 'yellow', label: 'CAUTIOUS LONG / DRIFTING',
-        summary: 'Calm market but the wind is not at your back. Rallies may be sold. Take partial profits or wait for a better entry.',
-        why: yellowReasons.slice(0, 3),
-        partialNote, zeroGammaNote
-      };
-    }
-    // Positive GEX with no Yellow warning tripped, but missing DEX or Zero
-    // Gamma means we can't actually confirm the clean Green setup either.
-    if (!haveDex || !haveZeroGamma) {
-      return {
-        state: 'neutral', label: 'INSUFFICIENT DATA / FLAT',
-        summary: 'Data unclear. Size down or wait.',
-        why: ['Total GEX is positive, but Dealer Delta or Zero Gamma is unavailable to confirm a clean setup.'],
-        partialNote, zeroGammaNote
-      };
+    if (!haveDex) {
+      return mk('neutral', 'INSUFFICIENT DATA / FLAT', 'Data unclear. Size down or wait.', 'Dealer Delta unavailable to confirm a clean setup.');
     }
   }
 
-  // --- Default: parameters don't clearly align with any confirmed regime above ---
-  return {
-    state: 'neutral', label: 'INSUFFICIENT DATA / FLAT',
-    summary: 'Data unclear. Size down or wait.',
-    why: [zeroGammaNote || 'Parameters are conflicting or incomplete relative to the rules above.'],
-    partialNote, zeroGammaNote
-  };
+  // --- Danger regime (below Zero Gamma) with negative GEX, but floor still intact — mixed, not a clean Red. ---
+  if (totalGex < 0 && zgAbove === false && pwAbove === true) {
+    return mk('orange', 'TRANSITION / HIGH RISK', ORANGE_SUMMARY, 'Danger regime below Zero Gamma, but Put Wall floor still holding.');
+  }
+
+  // --- Default: insufficient/conflicting ---
+  return mk('neutral', 'INSUFFICIENT DATA / FLAT', 'Data unclear. Size down or wait.', 'Parameters are conflicting or incomplete relative to the rules above.');
+}
+
+/* =========================================================================
+   IV WALL HIERARCHY MODIFIER — High/Low IV walls evaluated relative to BOTH
+   spot and Put Wall. Applied LAST in the modifier chain (after session,
+   Max Pain extended, and Macro Event Mode — all unchanged) so its IV note
+   reliably lands in the "why" array's 3rd slot without being displaced by
+   an earlier modifier's own reason. High IV always takes priority for both
+   the note shown and any state adjustment; Low IV is shown only when no
+   High IV wall exists, and never changes state.
+   ========================================================================= */
+function applyIvWallHierarchyModifier(signal, { ivWalls, spot, putWall }) {
+  const havePutWall = putWall !== null && putWall !== undefined && !Number.isNaN(putWall) && putWall !== 0;
+  const highStrike = ivWalls && ivWalls.ivHigh !== null && ivWalls.ivHigh !== undefined ? ivWalls.ivHigh : null;
+  const lowStrike = ivWalls && ivWalls.ivLow !== null && ivWalls.ivLow !== undefined ? ivWalls.ivLow : null;
+
+  let ivNote = null;
+  let stateOverride = null;
+
+  if (highStrike !== null && spot) {
+    if (highStrike > spot) {
+      ivNote = 'High IV above spot. Take profits near resistance.';
+      // above-spot case: informational only, no state change
+    } else if (havePutWall && highStrike <= putWall) {
+      ivNote = 'High IV below Put Wall. Floor is being questioned.';
+      if (signal.state === 'green' || signal.state === 'yellow') {
+        stateOverride = { state: 'orange', label: 'TRANSITION / HIGH RISK',
+          summary: 'Market structure is shifting. Do not enter new positions. If in a trade, tighten stop losses immediately.' };
+      }
+    } else {
+      // below spot, and either above Put Wall or Put Wall unknown
+      const pwText = havePutWall ? ` Put Wall below at $${fmtPrice(putWall)}.` : '';
+      ivNote = 'High IV below spot. Caution.' + pwText;
+      if (signal.state === 'green') {
+        stateOverride = { state: 'yellow', label: 'CAUTIOUS LONG / DRIFTING',
+          summary: 'Calm market but the wind is not at your back. Rallies may be sold. Take partial profits or wait for a better entry.' };
+      }
+    }
+  } else if (lowStrike !== null && spot) {
+    // Low IV note only shown when no High IV wall exists — High IV takes priority for the "why" slot.
+    if (lowStrike > spot) {
+      ivNote = `Low IV above spot. Possible resistance at $${fmtPrice(lowStrike)}.`;
+    } else if (havePutWall && lowStrike <= putWall) {
+      ivNote = 'Low IV below Put Wall. Little fear below the floor.';
+    } else if (havePutWall) {
+      ivNote = 'Low IV between spot and Put Wall. Possible soft landing.';
+    } else {
+      ivNote = 'Low IV below spot.';
+    }
+    // Low IV never changes state, regardless of position.
+  }
+
+  if (!ivNote) return signal; // no IV walls in the selected expiry bucket -> no IV note, signal unchanged
+
+  const why = signal.why.slice(0, 2); // Zero Gamma + Put Wall relationships always keep slots 1-2
+  why.push(ivNote);
+  const base = stateOverride ? { ...signal, ...stateOverride } : signal;
+  return { ...base, why };
 }
 
 const HEADLINE_STATE_META = {
@@ -2158,7 +2165,7 @@ function buildSecondaryContextNotes({ weeklyTotalGex, weeklyDex, weeklyZeroGamma
   return notes;
 }
 
-function renderRegime(totalGex, trendInfo, dex, spot, zeroGamma, maxPain, allExpiriesTotalGex = null, allExpiriesDex = null, allExpiriesZeroGamma = null) {
+function renderRegime(totalGex, trendInfo, dex, spot, zeroGamma, putWall, maxPain, allExpiriesTotalGex = null, allExpiriesDex = null, allExpiriesZeroGamma = null, bannerIvWalls = null) {
   const banner = document.getElementById('regimeBanner');
   const title = document.getElementById('regimeTitle');
   const summaryEl = document.getElementById('regimeSummary');
@@ -2184,12 +2191,16 @@ function renderRegime(totalGex, trendInfo, dex, spot, zeroGamma, maxPain, allExp
   const hoursToExpiry = (nextFridayExpiry().getTime() - Date.now()) / 3600000;
   const session = getTradingSession();
 
-  // Base rule engine, then layered contextual modifiers, then the
+  // Base rule engine (Spot -> Zero Gamma -> Put Wall hierarchy), then
+  // layered contextual modifiers (session / Max Pain extended / Macro Event
+  // Mode — all unchanged — then the new IV Wall hierarchy modifier last, so
+  // its note reliably lands in the "why" array's 3rd slot), then the
   // 2-cycle confirmation gate before anything actually reaches the banner.
-  let signal = generateHeadlineSignal({ totalGex, trendInfo, dex, spot, zeroGamma, maxPain, allExpiriesTotalGex, allExpiriesDex });
+  let signal = generateHeadlineSignal({ totalGex, trendInfo, dex, spot, zeroGamma, putWall, maxPain, allExpiriesTotalGex, allExpiriesDex });
   signal = applySessionModifier(signal, { totalGex, dex, session });
   signal = applyMaxPainExtendedModifier(signal, { spot, maxPain, hoursToExpiry });
   signal = applyMacroEventModifier(signal);
+  signal = applyIvWallHierarchyModifier(signal, { ivWalls: bannerIvWalls, spot, putWall });
   const confirmed = confirmSignal(signal);
   const display = confirmed.display;
 
@@ -2205,7 +2216,7 @@ function renderRegime(totalGex, trendInfo, dex, spot, zeroGamma, maxPain, allExp
   action.textContent = display.summary;
   partialNoteEl.textContent = display.partialNote || '';
   pendingNoteEl.textContent = confirmed.pendingNote || '';
-  dangerNoteEl.textContent = display.zeroGammaNote ? '⚠️ ' + display.zeroGammaNote : '';
+  dangerNoteEl.textContent = display.floorBrokenNote ? '⚠️ ' + display.floorBrokenNote : '';
 
   const secondaryNotes = buildSecondaryContextNotes({
     weeklyTotalGex: totalGex, weeklyDex: dex, weeklyZeroGamma: zeroGamma,
@@ -2453,13 +2464,28 @@ async function refreshLiveData() {
     const { putWall: putWallWeekly, callWall: callWallWeekly } = findWalls(gexByStrikeWeekly, effectiveSpot);
     const dexWeekly = computeTotalDex(weeklyChain, effectiveSpot);
 
+    // IV Walls now come from the backend (/api/gex/latest), not local
+    // computation. Best-effort: a failure here doesn't block the rest of
+    // the cycle — the banner/chart/cheat-sheet just show no IV Wall data
+    // for this refresh, exactly like any other missing/null field.
+    const ivSnapshot = await fetchIvWallSnapshot();
+    if (mySeq !== liveRequestSeq) { endFetch(); return; } // superseded while fetching IV walls
+    if (ivSnapshot) lastIvWallSnapshot = ivSnapshot;
+    // Banner is always Weekly-scoped for IV Walls too, independent of
+    // whatever display filter the Strike Map chart currently has selected —
+    // weekly stays the single source of truth for the trading decision.
+    const bannerIvWalls = lastIvWallSnapshot
+      ? { ivHigh: lastIvWallSnapshot.weekly.ivWall, ivLow: lastIvWallSnapshot.weekly.lowIvWall }
+      : { ivHigh: null, ivLow: null };
+
     // Feature 3: rolling-window trend now tracks WEEKLY Total GEX going
     // forward (the session-fallback buffer switches immediately; VPS-sourced
     // history reflects whatever your VPS has historically logged, which may
     // still be a blended figure until its own logging is updated).
     recordSessionGexSnapshot(totalGexWeekly);
     const trendInfo = computeTrendInfo(totalGexWeekly);
-    renderRegime(totalGexWeekly, trendInfo, dexWeekly, effectiveSpot, zeroGammaWeekly, maxPain, totalGexAll, dexAll, zeroGammaAll);
+    renderRegime(totalGexWeekly, trendInfo, dexWeekly, effectiveSpot, zeroGammaWeekly, putWallWeekly, maxPain,
+      totalGexAll, dexAll, zeroGammaAll, bannerIvWalls);
 
     // Cache the raw chain/spot/weekly-zero-gamma so the Strike Map's expiry
     // filter and IV Walls toggle can re-render instantly without a re-fetch.
@@ -2484,32 +2510,36 @@ async function refreshLiveData() {
     // fall back to your VPS's /api/gex/latest snapshot — it's your own
     // server logging the same figures, so it's a legitimate substitute for
     // exactly this scenario. Per-strike detail isn't in a single snapshot,
-    // so the strike map and term structure keep showing their last known
-    // state, but the headline signal, DEX, and price levels can still update.
+    // so the strike map's bars keep showing their last known state, but the
+    // headline signal, DEX, price levels, and — now that the backend
+    // includes them — a real Weekly vs All-Expiries split (including IV
+    // Walls) can all still update from this single snapshot.
     try {
       const snap = normalizeVpsSnapshot(await fetchVpsLatest());
-      if (snap.totalGex !== null) {
+      if (snap.weekly.totalGex !== null) {
         vpsSnapshotFallbackActive = true;
         document.getElementById('gexUpdated').textContent = 'updated ' + nowStr() + ' (VPS snapshot — Deribit unreachable)';
 
-        recordSessionGexSnapshot(snap.totalGex);
-        const trendInfo = computeTrendInfo(snap.totalGex);
-        // A single VPS snapshot has no Weekly/All-Expiries split — its values
-        // are treated as the Weekly figures (consistent with Max Pain always
-        // being weekly-only), with All-Expiries passed as null (secondary
-        // column shows "--", conflict-check and secondary notes trivially skip).
-        renderRegime(snap.totalGex, trendInfo, snap.dex, effectiveSpot, snap.zeroGamma, snap.maxPain, null, null, null);
+        recordSessionGexSnapshot(snap.weekly.totalGex);
+        const trendInfo = computeTrendInfo(snap.weekly.totalGex);
+        const bannerIvWalls = { ivHigh: snap.weekly.ivWall, ivLow: snap.weekly.lowIvWall };
+        renderRegime(snap.weekly.totalGex, trendInfo, snap.weekly.dex, effectiveSpot, snap.weekly.zeroGamma,
+          snap.weekly.putWall, snap.weekly.maxPain, snap.allExpiries.totalGex, snap.allExpiries.dex, snap.allExpiries.zeroGamma, bannerIvWalls);
         renderWeeklyTable(effectiveSpot,
-          { totalGex: snap.totalGex, dex: snap.dex, callWall: snap.callWall, putWall: snap.putWall, zeroGamma: snap.zeroGamma, maxPain: snap.maxPain },
-          { totalGex: null, dex: null, callWall: null, putWall: null, zeroGamma: null }
+          { totalGex: snap.weekly.totalGex, dex: snap.weekly.dex, callWall: snap.weekly.callWall, putWall: snap.weekly.putWall, zeroGamma: snap.weekly.zeroGamma, maxPain: snap.weekly.maxPain },
+          { totalGex: snap.allExpiries.totalGex, dex: snap.allExpiries.dex, callWall: snap.allExpiries.callWall, putWall: snap.allExpiries.putWall, zeroGamma: snap.allExpiries.zeroGamma }
         );
 
+        // Strike Map IV Walls summary/cheat line, sourced from this same snapshot.
+        lastIvWallSnapshot = snap;
+        renderIvWallsDisplayOnly();
+
         lastLoggedMetrics = {
-          totalGex: snap.totalGex, dex: snap.dex, zeroGamma: snap.zeroGamma,
-          maxPain: snap.maxPain, putWall: snap.putWall, callWall: snap.callWall
+          totalGex: snap.weekly.totalGex, dex: snap.weekly.dex, zeroGamma: snap.weekly.zeroGamma,
+          maxPain: snap.weekly.maxPain, putWall: snap.weekly.putWall, callWall: snap.weekly.callWall
         };
       } else {
-        throw new Error('VPS snapshot missing a usable Total GEX figure');
+        throw new Error('VPS snapshot missing a usable Weekly Total GEX figure');
       }
     } catch (snapErr) {
       vpsSnapshotFallbackActive = false;
