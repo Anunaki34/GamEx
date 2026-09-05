@@ -201,7 +201,7 @@
   .regime-session-note{color:var(--text-faint); font-size:10px; margin-top:4px; font-style:italic;}
   .regime-expiry-note{color:var(--text-faint); font-size:10px; margin-top:4px;}
   .regime-pending-note{color:var(--cyan); font-size:10px; font-weight:600; margin-top:4px; letter-spacing:.03em;}
-  .macro-toggle-row{margin:-4px 0 14px 0;}
+  .macro-toggle-row{margin:-4px 0 14px 0; display:flex; gap:8px; flex-wrap:wrap;}
   .macro-toggle{
     background:var(--panel-2); border:1px solid var(--line); color:var(--text-dim);
     font-family:'IBM Plex Mono',monospace; font-size:10.5px; padding:6px 14px; border-radius:2px; cursor:pointer;
@@ -459,6 +459,8 @@
 
   <div class="macro-toggle-row">
     <button class="macro-toggle" id="macroToggleBtn">Macro Event Mode: OFF</button>
+    <button class="macro-toggle" id="alertsToggleBtn">Key-Level Alerts: OFF</button>
+    <button class="macro-toggle" id="alertSoundToggleBtn">Alert Sound: OFF</button>
   </div>
 
   <!-- Part 4.2 + 4.3: Strike map + sidebar -->
@@ -1896,13 +1898,43 @@ function generateHeadlineSignal({ totalGex, trendInfo, dex, spot, zeroGamma, put
 }
 
 /* =========================================================================
+   ZERO GAMMA PROXIMITY BUFFER — spot vs Zero Gamma is no longer a plain
+   boolean for the purposes of this softening pass: within 1% on either
+   side counts as "near" the line, which is treated as reduced confidence
+   regardless of which side spot is nominally on. Applied FIRST in the
+   modifier chain (right after the base hierarchy, before session / Max
+   Pain extended / Macro Event Mode / IV Walls), per spec. Always uses
+   Weekly Zero Gamma — the same primary reference the base hierarchy uses.
+   ========================================================================= */
+const ZERO_GAMMA_PROXIMITY_PCT = 0.01; // 1%
+
+function applyZeroGammaProximityBuffer(signal, { spot, zeroGamma }) {
+  if (zeroGamma === null || zeroGamma === undefined || Number.isNaN(zeroGamma) || zeroGamma === 0 || !spot) return signal;
+  const pctDistance = Math.abs(spot - zeroGamma) / zeroGamma;
+  if (pctDistance > ZERO_GAMMA_PROXIMITY_PCT) return signal; // not near — signal unchanged
+
+  const note = 'Spot is near Zero Gamma. Volatility can spike either way.';
+  let out = signal;
+  if (signal.state === 'green') {
+    out = { ...signal, state: 'yellow', label: 'CAUTIOUS LONG / DRIFTING',
+      summary: 'Calm market but the wind is not at your back. Rallies may be sold. Take partial profits or wait for a better entry.' };
+  } else if (signal.state === 'yellow') {
+    out = { ...signal, state: 'orange', label: 'TRANSITION / HIGH RISK',
+      summary: 'Market structure is shifting. Do not enter new positions. If in a trade, tighten stop losses immediately.' };
+  }
+  // Orange / Red / Neutral: state left unchanged, but the note still applies.
+  return { ...out, why: [...out.why, note] };
+}
+
+/* =========================================================================
    IV WALL HIERARCHY MODIFIER — High/Low IV walls evaluated relative to BOTH
    spot and Put Wall. Applied LAST in the modifier chain (after session,
-   Max Pain extended, and Macro Event Mode — all unchanged) so its IV note
-   reliably lands in the "why" array's 3rd slot without being displaced by
-   an earlier modifier's own reason. High IV always takes priority for both
-   the note shown and any state adjustment; Low IV is shown only when no
-   High IV wall exists, and never changes state.
+   Max Pain extended, Macro Event Mode, and the Zero Gamma proximity buffer
+   above — all unchanged/composable) so its IV note is always the final
+   entry appended to "why", never overwriting an earlier modifier's note.
+   High IV always takes priority for both the note shown and any state
+   adjustment; Low IV is shown only when no High IV wall exists, and never
+   changes state.
    ========================================================================= */
 function applyIvWallHierarchyModifier(signal, { ivWalls, spot, putWall }) {
   const havePutWall = putWall !== null && putWall !== undefined && !Number.isNaN(putWall) && putWall !== 0;
@@ -1947,8 +1979,11 @@ function applyIvWallHierarchyModifier(signal, { ivWalls, spot, putWall }) {
 
   if (!ivNote) return signal; // no IV walls in the selected expiry bucket -> no IV note, signal unchanged
 
-  const why = signal.why.slice(0, 2); // Zero Gamma + Put Wall relationships always keep slots 1-2
-  why.push(ivNote);
+  // Appends rather than overwrites, so this composes with any note already
+  // added by an earlier modifier (e.g. the Zero Gamma proximity buffer)
+  // instead of erasing it. Zero Gamma + Put Wall relationships (slots 1-2)
+  // are never touched since they're always the first two entries.
+  const why = [...signal.why, ivNote];
   const base = stateOverride ? { ...signal, ...stateOverride } : signal;
   return { ...base, why };
 }
@@ -2110,6 +2145,111 @@ function setMacroEventMode(on) {
   refreshLiveData(); // reflect the change immediately rather than waiting up to 60s
 }
 
+/* =========================================================================
+   KEY-LEVEL ALERTS — browser notification + sound when spot comes within
+   0.5% of Weekly Put Wall / Call Wall / Zero Gamma / Weekly Max Pain.
+   Notifications and sound are independently toggleable and persisted.
+   Each level only fires once per approach: it arms again only after spot
+   moves back outside the 0.5% band, so a stalled spot price sitting right
+   at a level doesn't spam a notification every 60s (a reasonable,
+   documented UX choice — not explicitly specified either way).
+   ========================================================================= */
+const KEY_LEVEL_ALERT_PCT = 0.005; // 0.5%
+const KEY_LEVEL_DEFS = [
+  ['putWall', 'Put Wall'],
+  ['callWall', 'Call Wall'],
+  ['zeroGamma', 'Zero Gamma'],
+  ['maxPain', 'Max Pain']
+];
+
+let keyLevelAlertsEnabled = false;
+let keyLevelSoundEnabled = false;
+try {
+  keyLevelAlertsEnabled = localStorage.getItem('keyLevelAlertsEnabled') === 'true';
+  keyLevelSoundEnabled = localStorage.getItem('keyLevelSoundEnabled') === 'true';
+} catch (e) { /* localStorage unavailable */ }
+
+// Tracks whether each level is currently "armed" (spot outside the band,
+// ready to fire again) vs "already alerted" (spot inside the band, won't
+// re-fire until it leaves).
+let keyLevelAlertedState = { putWall: false, callWall: false, zeroGamma: false, maxPain: false };
+
+// Short synthesized beep via Web Audio API — no external audio asset needed.
+function playAlertBeep() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.15, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.3);
+  } catch (e) {
+    console.warn('[Alerts] Could not play sound:', e.message);
+  }
+}
+
+function fireKeyLevelAlert(levelLabel, levelPrice, spot) {
+  const text = `Spot $${fmtPrice(spot)} is within 0.5% of ${levelLabel} at $${fmtPrice(levelPrice)}.`;
+  if (keyLevelAlertsEnabled && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+    try { new Notification('GEX Terminal — ' + levelLabel + ' Alert', { body: text }); }
+    catch (e) { console.warn('[Alerts] Notification failed:', e.message); }
+  }
+  if (keyLevelSoundEnabled) playAlertBeep();
+  console.info('[Alerts] ' + levelLabel + ': ' + text);
+}
+
+// levels: { putWall, callWall, zeroGamma, maxPain } — all Weekly-scoped, per spec.
+function checkKeyLevelAlerts(spot, levels) {
+  if (!keyLevelAlertsEnabled && !keyLevelSoundEnabled) return; // both off — skip the work entirely
+  if (!spot) return;
+  for (const [key, label] of KEY_LEVEL_DEFS) {
+    const price = levels[key];
+    if (price === null || price === undefined || Number.isNaN(price) || price === 0) {
+      keyLevelAlertedState[key] = false;
+      continue;
+    }
+    const withinBand = Math.abs(spot - price) / price <= KEY_LEVEL_ALERT_PCT;
+    if (withinBand && !keyLevelAlertedState[key]) {
+      fireKeyLevelAlert(label, price, spot);
+      keyLevelAlertedState[key] = true;
+    } else if (!withinBand) {
+      keyLevelAlertedState[key] = false; // re-arm once spot moves back outside the band
+    }
+  }
+}
+
+function setKeyLevelAlertsEnabled(on) {
+  keyLevelAlertsEnabled = on;
+  try { localStorage.setItem('keyLevelAlertsEnabled', String(on)); } catch (e) { /* localStorage unavailable */ }
+  const btn = document.getElementById('alertsToggleBtn');
+  if (btn) {
+    btn.textContent = on ? 'Key-Level Alerts: ON' : 'Key-Level Alerts: OFF';
+    btn.className = 'macro-toggle' + (on ? ' active' : '');
+  }
+  // Browser notifications require an explicit permission grant, which must
+  // be requested from a user gesture (this click) — never auto-requested on load.
+  if (on && typeof Notification !== 'undefined' && Notification.permission === 'default') {
+    Notification.requestPermission().catch(() => { /* ignore — falls back to console-only alerts */ });
+  }
+}
+
+function setKeyLevelSoundEnabled(on) {
+  keyLevelSoundEnabled = on;
+  try { localStorage.setItem('keyLevelSoundEnabled', String(on)); } catch (e) { /* localStorage unavailable */ }
+  const btn = document.getElementById('alertSoundToggleBtn');
+  if (btn) {
+    btn.textContent = on ? 'Alert Sound: ON' : 'Alert Sound: OFF';
+    btn.className = 'macro-toggle' + (on ? ' active' : '');
+  }
+}
+
 // --- Consecutive signal confirmation: a NEW state must repeat for 2
 // consecutive 60s cycles before the banner actually flips to it. ---
 const SIGNAL_CONFIRMATION_CYCLES = 2;
@@ -2197,6 +2337,7 @@ function renderRegime(totalGex, trendInfo, dex, spot, zeroGamma, putWall, maxPai
   // its note reliably lands in the "why" array's 3rd slot), then the
   // 2-cycle confirmation gate before anything actually reaches the banner.
   let signal = generateHeadlineSignal({ totalGex, trendInfo, dex, spot, zeroGamma, putWall, maxPain, allExpiriesTotalGex, allExpiriesDex });
+  signal = applyZeroGammaProximityBuffer(signal, { spot, zeroGamma });
   signal = applySessionModifier(signal, { totalGex, dex, session });
   signal = applyMaxPainExtendedModifier(signal, { spot, maxPain, hoursToExpiry });
   signal = applyMacroEventModifier(signal);
@@ -2209,7 +2350,7 @@ function renderRegime(totalGex, trendInfo, dex, spot, zeroGamma, putWall, maxPai
   banner.className = 'regime-banner ' + meta.cls;
   title.textContent = display.label;
   summaryEl.textContent = display.summary;
-  whyEl.textContent = display.why && display.why.length ? display.why.slice(0, 3).join(' ') : '';
+  whyEl.textContent = display.why && display.why.length ? display.why.slice(0, 4).join(' ') : '';
   icon.textContent = meta.icon;
   csRegime.textContent = display.label;
   csRegime.className = meta.csClass;
@@ -2487,6 +2628,9 @@ async function refreshLiveData() {
     renderRegime(totalGexWeekly, trendInfo, dexWeekly, effectiveSpot, zeroGammaWeekly, putWallWeekly, maxPain,
       totalGexAll, dexAll, zeroGammaAll, bannerIvWalls);
 
+    // Key-Level Alerts: Weekly Put Wall / Call Wall / Zero Gamma / Weekly Max Pain.
+    checkKeyLevelAlerts(effectiveSpot, { putWall: putWallWeekly, callWall: callWallWeekly, zeroGamma: zeroGammaWeekly, maxPain });
+
     // Cache the raw chain/spot/weekly-zero-gamma so the Strike Map's expiry
     // filter and IV Walls toggle can re-render instantly without a re-fetch.
     lastFetchedChain = chain;
@@ -2686,6 +2830,17 @@ function boot() {
   macroBtn.textContent = macroEventMode ? 'Macro Event Mode: ON' : 'Macro Event Mode: OFF';
   macroBtn.className = 'macro-toggle' + (macroEventMode ? ' active' : '');
   macroBtn.addEventListener('click', () => setMacroEventMode(!macroEventMode));
+
+  // Key-Level Alerts + Alert Sound toggles — reflect persisted state, wire the clicks.
+  const alertsBtn = document.getElementById('alertsToggleBtn');
+  alertsBtn.textContent = keyLevelAlertsEnabled ? 'Key-Level Alerts: ON' : 'Key-Level Alerts: OFF';
+  alertsBtn.className = 'macro-toggle' + (keyLevelAlertsEnabled ? ' active' : '');
+  alertsBtn.addEventListener('click', () => setKeyLevelAlertsEnabled(!keyLevelAlertsEnabled));
+
+  const soundBtn = document.getElementById('alertSoundToggleBtn');
+  soundBtn.textContent = keyLevelSoundEnabled ? 'Alert Sound: ON' : 'Alert Sound: OFF';
+  soundBtn.className = 'macro-toggle' + (keyLevelSoundEnabled ? ' active' : '');
+  soundBtn.addEventListener('click', () => setKeyLevelSoundEnabled(!keyLevelSoundEnabled));
 
   initRiskChecklist();
   initLogSignalButton();
