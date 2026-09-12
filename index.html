@@ -1633,13 +1633,20 @@ function normalizeVpsSnapshot(snap) {
     // dvol_7d_avg/dvol_trend/dvol_vs_price may legitimately be null for the
     // first 24-48h while the backend builds enough history — null here is
     // "provisional," never treated as an error.
+       // DVOL — nested under a single top-level `dvol` object in the API
+    // response (NOT flat dvol_* keys). JSON uses short key names
+    // (current/avg_24h/avg_7d/trend/regime/vs_price); the dvol_ prefix only
+    // exists on the SQLite column names. dvol.current and dvol.regime are
+    // documented as accurate immediately; avg_24h/avg_7d/trend/vs_price may
+    // legitimately be null for the first 24-48h while the backend builds
+    // enough history — null here is "provisional," never treated as an error.
     dvol: {
-      current: num(snap.dvol_current),
-      avg24h: num(snap.dvol_24h_avg),
-      avg7d: num(snap.dvol_7d_avg),
-      trend: str(snap.dvol_trend),     // 'rising' | 'falling' | 'stable' | null
-      regime: str(snap.dvol_regime),   // 'high' | 'low' | 'neutral' | null
-      vsPrice: str(snap.dvol_vs_price) // 'diverging' | 'aligned' | 'neutral' | null
+      current: num(snap.dvol?.current),
+      avg24h: num(snap.dvol?.avg_24h),
+      avg7d: num(snap.dvol?.avg_7d),
+      trend: str(snap.dvol?.trend),     // 'stable' | 'rising' | 'falling' | null (lowercased by str())
+      regime: str(snap.dvol?.regime),   // 'low' | 'high' | 'neutral' | null (lowercased by str())
+      vsPrice: str(snap.dvol?.vs_price) // 'neutral' | 'diverging' | 'aligned' | null (lowercased by str())
     }
   };
 }
